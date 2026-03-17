@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> pre-commit: syntax check"
+bash -n ccswitch.sh
+
+if command -v shellcheck >/dev/null 2>&1; then
+    echo "==> pre-commit: shellcheck"
+    shellcheck ccswitch.sh
+else
+    echo "==> pre-commit: shellcheck not found, skipping"
+fi

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq shellcheck
+          sudo apt-get install -y bats || true
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install jq shellcheck bats-core
+
+      - name: Check bash syntax
+        run: bash -n ccswitch.sh
+
+      - name: Run shellcheck
+        run: shellcheck ccswitch.sh
+
+      - name: Run bats tests
+        if: hashFiles('test/*.bats') != ''
+        run: bats test/

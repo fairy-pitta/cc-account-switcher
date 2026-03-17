@@ -12,3 +12,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 .temp/
+
+# npm
+node_modules/
+*.tgz
