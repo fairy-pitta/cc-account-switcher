@@ -404,13 +404,17 @@ handle_restart_after_switch() {
             echo "Please restart Claude Code to use the new authentication."
             ;;
         *)
-            # Default: ask user
-            echo -n "Restart Claude Code now? [Y/n] "
-            read -r response
-            if [[ "$response" == "n" || "$response" == "N" ]]; then
-                echo "Please restart Claude Code to use the new authentication."
+            # Default: ask user (skip if non-interactive)
+            if [[ -t 0 ]]; then
+                echo -n "Restart Claude Code now? [Y/n] "
+                read -r response
+                if [[ "$response" == "n" || "$response" == "N" ]]; then
+                    echo "Please restart Claude Code to use the new authentication."
+                else
+                    restart_claude_code
+                fi
             else
-                restart_claude_code
+                echo "Please restart Claude Code to use the new authentication."
             fi
             ;;
     esac
@@ -1083,7 +1087,18 @@ cmd_switch_to() {
     # Resolve identifier (number, email, or profile name)
     target_account=$(resolve_account_identifier "$identifier")
     if [[ -z "$target_account" ]]; then
-        echo "Error: No account found matching: $identifier"
+        # Provide specific error for email-like input vs invalid format
+        if [[ "$identifier" =~ @ ]]; then
+            echo "Error: No account found with email: $identifier"
+        elif [[ ! "$identifier" =~ ^[0-9]+$ ]]; then
+            if validate_email "$identifier" 2>/dev/null; then
+                echo "Error: No account found matching: $identifier"
+            else
+                echo "Error: Invalid email format: $identifier"
+            fi
+        else
+            echo "Error: No account found matching: $identifier"
+        fi
         exit 1
     fi
 
