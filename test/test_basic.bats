@@ -41,11 +41,12 @@ teardown() {
     # Directly test check_dependencies by sourcing and calling
     source_ccswitch_functions
 
-    # Temporarily override PATH to hide jq, keeping only /bin for builtins
-    local saved_path="$PATH"
-    export PATH="$MOCK_BIN:/bin"
-    # Remove any jq from MOCK_BIN
+    # Remove any jq from MOCK_BIN before restricting PATH
     rm -f "$MOCK_BIN/jq"
+
+    # Temporarily override PATH to hide jq
+    local saved_path="$PATH"
+    export PATH="$MOCK_BIN"
 
     run check_dependencies
     export PATH="$saved_path"

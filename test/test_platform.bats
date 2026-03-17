@@ -46,7 +46,7 @@ teardown() {
     [ "$read_back" = "$test_creds" ]
 
     local perms
-    perms=$(stat -f '%A' "$HOME/.claude/.credentials.json" 2>/dev/null || stat -c '%a' "$HOME/.claude/.credentials.json" 2>/dev/null)
+    perms=$(stat -c '%a' "$HOME/.claude/.credentials.json" 2>/dev/null) || perms=$(stat -f '%A' "$HOME/.claude/.credentials.json" 2>/dev/null)
     [ "$perms" = "600" ]
 }
 
