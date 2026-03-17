@@ -1,0 +1,48 @@
+#!/usr/bin/env node
+
+"use strict";
+
+const { execFileSync } = require("child_process");
+const path = require("path");
+const fs = require("fs");
+
+// Check for bash availability
+try {
+  execFileSync("bash", ["--version"], { stdio: "ignore" });
+} catch {
+  console.error("Error: bash is required but was not found in PATH.");
+  console.error("Please install bash 4.4+ to use ccswitch.");
+  process.exit(1);
+}
+
+// Check for jq availability
+try {
+  execFileSync("jq", ["--version"], { stdio: "ignore" });
+} catch {
+  console.error("Error: jq is required but was not found in PATH.");
+  console.error(
+    "Install with: brew install jq (macOS) or sudo apt install jq (Linux)"
+  );
+  process.exit(1);
+}
+
+// Resolve path to ccswitch.sh relative to this wrapper
+const scriptPath = path.join(__dirname, "..", "ccswitch.sh");
+
+if (!fs.existsSync(scriptPath)) {
+  console.error(`Error: ccswitch.sh not found at ${scriptPath}`);
+  process.exit(1);
+}
+
+// Pass through all arguments to the bash script
+const args = process.argv.slice(2);
+
+try {
+  execFileSync("bash", [scriptPath, ...args], {
+    stdio: "inherit",
+    env: process.env,
+  });
+} catch (err) {
+  // execFileSync throws on non-zero exit; propagate the exit code
+  process.exit(err.status || 1);
+}
