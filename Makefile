@@ -10,10 +10,10 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-install: ## Install ccswitch to $(PREFIX)/bin
-	@echo "Installing ccswitch to $(BINDIR)..."
+install: ## Install ccs to $(PREFIX)/bin
+	@echo "Installing ccs to $(BINDIR)..."
 	install -d $(BINDIR)
-	install -m 755 ccswitch.sh $(BINDIR)/ccswitch
+	install -m 755 ccswitch.sh $(BINDIR)/ccs
 	@# Install bash completions if available
 	@if ls completions/*.bash 1>/dev/null 2>&1; then \
 		install -d $(BASH_COMPLETIONDIR); \
@@ -29,10 +29,11 @@ install: ## Install ccswitch to $(PREFIX)/bin
 		install -d $(FISH_COMPLETIONDIR); \
 		install -m 644 completions/*.fish $(FISH_COMPLETIONDIR)/; \
 	fi
-	@echo "Done. Run 'ccswitch --help' to get started."
+	@echo "Done. Run 'ccs help' to get started."
 
 uninstall: ## Remove installed files
-	@echo "Uninstalling ccswitch..."
+	@echo "Uninstalling ccs..."
+	rm -f $(BINDIR)/ccs
 	rm -f $(BINDIR)/ccswitch
 	rm -f $(BASH_COMPLETIONDIR)/ccswitch.bash
 	rm -f $(ZSH_COMPLETIONDIR)/_ccswitch

@@ -14,9 +14,9 @@ teardown() {
     run run_ccswitch --help
     [ "$status" -eq 0 ]
     [[ "$output" == *"Multi-Account Switcher for Claude Code"* ]]
-    [[ "$output" == *"--add-account"* ]]
-    [[ "$output" == *"--switch"* ]]
-    [[ "$output" == *"--list"* ]]
+    [[ "$output" == *"add"* ]]
+    [[ "$output" == *"sw"* ]]
+    [[ "$output" == *"ls"* ]]
 }
 
 @test "test_no_args_shows_usage_information" {

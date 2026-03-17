@@ -662,7 +662,7 @@ cmd_stats() {
 # Set profile name for an account
 cmd_set_profile() {
     if [[ $# -lt 2 ]]; then
-        echo "Usage: $0 --set-profile <account_number|email> <profile_name>"
+        echo "Usage: ccs profile <account_number|email> <profile_name>"
         exit 1
     fi
 
@@ -712,7 +712,7 @@ cmd_set_profile() {
 # Directory-based auto-switch: set mapping
 cmd_set_dir_account() {
     if [[ $# -lt 1 ]]; then
-        echo "Usage: $0 --set-dir-account [directory] <account_number|email|profile>"
+        echo "Usage: ccs dir [directory] <account_number|email|profile>"
         exit 1
     fi
 
@@ -774,7 +774,7 @@ cmd_set_dir_account() {
 cmd_auto_switch() {
     if [[ ! -f "$DIR_ACCOUNTS_FILE" ]]; then
         echo "No directory-account mappings configured."
-        echo "Use --set-dir-account to create mappings."
+        echo "Use 'ccs dir' to create mappings."
         exit 0
     fi
 
@@ -884,7 +884,7 @@ cmd_add_account() {
 # Remove account
 cmd_remove_account() {
     if [[ $# -eq 0 ]]; then
-        echo "Usage: $0 --remove-account <account_number|email>"
+        echo "Usage: ccs rm <account_number|email>"
         exit 1
     fi
 
@@ -980,7 +980,7 @@ first_run_setup() {
     read -r response
 
     if [[ "$response" == "n" || "$response" == "N" ]]; then
-        echo "Setup cancelled. You can run '$0 --add-account' later."
+        echo "Setup cancelled. You can run 'ccs add' later."
         return 1
     fi
 
@@ -1068,7 +1068,7 @@ cmd_switch() {
 # Switch to specific account
 cmd_switch_to() {
     if [[ $# -eq 0 ]]; then
-        echo "Usage: $0 --switch-to <account_number|email|profile>"
+        echo "Usage: ccs to <account_number|email|profile>"
         exit 1
     fi
 
@@ -1249,49 +1249,49 @@ perform_switch() {
 # Show usage
 show_usage() {
     echo "Multi-Account Switcher for Claude Code v${VERSION}"
-    echo "Usage: $0 [OPTIONS] [COMMAND]"
+    echo "Usage: ccs [OPTIONS] <command> [args]"
     echo ""
     echo "Account Management:"
-    echo "  --add-account                              Add current account to managed accounts"
-    echo "  --remove-account <num|email>               Remove account by number or email"
-    echo "  --list                                     List all managed accounts"
+    echo "  add                              Add current account to managed accounts"
+    echo "  rm <num|email>                   Remove account by number or email"
+    echo "  ls                               List all managed accounts"
     echo ""
     echo "Switching:"
-    echo "  --switch                                   Rotate to next account in sequence"
-    echo "  --switch-to <num|email|profile>             Switch to specific account"
+    echo "  sw                               Rotate to next account in sequence"
+    echo "  to <num|email|profile>           Switch to specific account"
     echo ""
     echo "Profile Management:"
-    echo "  --set-profile <num|email> <name>            Set a friendly profile name for an account"
+    echo "  profile <num|email> <name>       Set a friendly profile name for an account"
     echo ""
     echo "Directory-based Switching:"
-    echo "  --set-dir-account [dir] <num|email|profile> Associate a directory with an account"
-    echo "  --auto-switch                               Switch based on current directory mapping"
+    echo "  dir [dir] <num|email|profile>    Associate a directory with an account"
+    echo "  auto                             Switch based on current directory mapping"
     echo ""
     echo "Diagnostics:"
-    echo "  --check                                    Verify backup integrity (JSON, permissions, keychain)"
-    echo "  --status                                   Show current account, token expiry, last switch"
-    echo "  --stats                                    Show per-account usage statistics"
+    echo "  check                            Verify backup integrity (JSON, permissions, keychain)"
+    echo "  status                           Show current account, token expiry, last switch"
+    echo "  stats                            Show per-account usage statistics"
     echo ""
     echo "Options:"
-    echo "  --dry-run, -n                              Show what would happen without making changes"
-    echo "  --restart                                  Restart Claude Code after switching"
-    echo "  --no-restart                               Skip restart prompt after switching"
-    echo "  --version                                  Show version number"
-    echo "  --help                                     Show this help message"
+    echo "  -n, --dry-run                    Show what would happen without making changes"
+    echo "  -r, --restart                    Restart Claude Code after switching"
+    echo "  --no-restart                     Skip restart prompt after switching"
+    echo "  version                          Show version number"
+    echo "  help                             Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0 --add-account"
-    echo "  $0 --list"
-    echo "  $0 --switch"
-    echo "  $0 --switch-to 2"
-    echo "  $0 --switch-to user@example.com"
-    echo "  $0 --switch-to work                        # Switch by profile name"
-    echo "  $0 --dry-run --switch                      # Preview switch"
-    echo "  $0 --switch --restart                      # Switch and restart Claude Code"
-    echo "  $0 --set-profile 1 work                    # Name account 1 'work'"
-    echo "  $0 --set-dir-account ~/work 1              # Map ~/work to account 1"
-    echo "  $0 --auto-switch                           # Switch based on current directory"
-    echo "  $0 --remove-account user@example.com"
+    echo "  ccs add                                    # Add current account"
+    echo "  ccs ls                                     # List accounts"
+    echo "  ccs sw                                     # Rotate to next account"
+    echo "  ccs to 2                                   # Switch to account 2"
+    echo "  ccs to user@example.com                    # Switch by email"
+    echo "  ccs to work                                # Switch by profile name"
+    echo "  ccs -n sw                                  # Preview switch"
+    echo "  ccs sw -r                                  # Switch and restart Claude Code"
+    echo "  ccs profile 1 work                         # Name account 1 'work'"
+    echo "  ccs dir ~/work 1                           # Map ~/work to account 1"
+    echo "  ccs auto                                   # Switch based on current directory"
+    echo "  ccs rm user@example.com                    # Remove account"
 }
 
 # Main script logic
@@ -1313,7 +1313,7 @@ main() {
                 DRY_RUN=true
                 shift
                 ;;
-            --restart)
+            --restart|-r)
                 RESTART_FLAG="restart"
                 shift
                 ;;
@@ -1332,47 +1332,47 @@ main() {
     set -- "${args[@]+"${args[@]}"}"
 
     case "${1:-}" in
-        --add-account)
+        add|--add-account)
             cmd_add_account
             ;;
-        --remove-account)
+        rm|--remove-account)
             shift
             cmd_remove_account "$@"
             ;;
-        --list)
+        ls|--list)
             cmd_list
             ;;
-        --switch)
+        sw|--switch)
             cmd_switch
             ;;
-        --switch-to)
+        to|--switch-to)
             shift
             cmd_switch_to "$@"
             ;;
-        --set-profile)
+        profile|--set-profile)
             shift
             cmd_set_profile "$@"
             ;;
-        --set-dir-account)
+        dir|--set-dir-account)
             shift
             cmd_set_dir_account "$@"
             ;;
-        --auto-switch)
+        auto|--auto-switch)
             cmd_auto_switch
             ;;
-        --check)
+        check|--check)
             cmd_check
             ;;
-        --status)
+        status|--status)
             cmd_status
             ;;
-        --stats)
+        stats|--stats)
             cmd_stats
             ;;
-        --version)
-            echo "ccswitch v${VERSION}"
+        version|--version)
+            echo "ccs v${VERSION}"
             ;;
-        --help)
+        help|--help)
             show_usage
             ;;
         "")

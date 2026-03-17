@@ -1,13 +1,13 @@
-# Bash completion for ccswitch
+# Bash completion for ccs (Claude Code account switcher)
 #
 # Installation:
 #   Option 1: Source directly in your .bashrc:
 #     source /path/to/completions/ccswitch.bash
 #
 #   Option 2: Copy to bash-completion directory:
-#     cp ccswitch.bash /etc/bash_completion.d/ccswitch
+#     cp ccswitch.bash /etc/bash_completion.d/ccs
 #     # or for user-local:
-#     cp ccswitch.bash ~/.local/share/bash-completion/completions/ccswitch
+#     cp ccswitch.bash ~/.local/share/bash-completion/completions/ccs
 #
 #   Option 3: If using the plugin, completions are loaded automatically.
 
@@ -32,18 +32,18 @@ _ccswitch() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    # All available commands
-    local commands="--add-account --remove-account --list --switch --switch-to --help --version --dry-run --check --status --stats --set-dir-account --set-profile --no-restart --interactive -i"
+    # All available subcommands and options
+    local commands="add rm ls sw to profile dir auto check status stats version help -n -r --dry-run --restart --no-restart"
 
     case "$prev" in
-        --switch-to|--remove-account|--set-profile)
+        to|--switch-to|rm|--remove-account|profile|--set-profile)
             # Complete with account numbers and emails
             local accounts
             accounts=$(_ccswitch_get_accounts_with_profiles)
             COMPREPLY=($(compgen -W "$accounts" -- "$cur"))
             return 0
             ;;
-        --set-dir-account)
+        dir|--set-dir-account)
             # First arg is a directory, second is account identifier
             if [[ ${COMP_CWORD} -eq 2 ]]; then
                 # Complete directories
@@ -59,14 +59,13 @@ _ccswitch() {
     esac
 
     # Default: complete commands
-    if [[ "$cur" == -* ]] || [[ -z "$cur" ]]; then
-        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
-    fi
+    COMPREPLY=($(compgen -W "$commands" -- "$cur"))
 
     return 0
 }
 
-# Register completion for both the script name and common aliases
+# Register completion for both the command name and common aliases
+complete -F _ccswitch ccs
 complete -F _ccswitch ccswitch
 complete -F _ccswitch ccswitch.sh
 complete -F _ccswitch ./ccswitch.sh
