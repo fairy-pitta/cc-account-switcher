@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SHA256 checksum
+        run: |
+          sha256sum ccswitch.sh > ccswitch.sh.sha256
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          # Try to extract section from CHANGELOG.md
+          if [ -f CHANGELOG.md ]; then
+            changelog=$(awk -v ver="$version" '
+              /^## \[/ {
+                if (found) exit
+                if (index($0, "[" ver "]")) found=1
+                next
+              }
+              found { print }
+            ' CHANGELOG.md)
+          fi
+          # Fall back to tag annotation
+          if [ -z "$changelog" ]; then
+            changelog=$(git tag -l --format='%(contents)' "v$version" 2>/dev/null || echo "Release v$version")
+          fi
+          # Write to file for gh release
+          echo "$changelog" > release_notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "Release ${{ github.ref_name }}" \
+            --notes-file release_notes.md \
+            ccswitch.sh \
+            ccswitch.sh.sha256
