@@ -1,26 +1,34 @@
 # Multi-Account Switcher for Claude Code
 
 [![CI](https://github.com/ming86/cc-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/ming86/cc-account-switcher/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/ming86/cc-account-switcher)](https://github.com/ming86/cc-account-switcher/releases)
+[![GitHub release](https://img.shields.io/github/v/release/ming86/cc-account-switcher?style=flat&color=blue)](https://github.com/ming86/cc-account-switcher/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-brightgreen)](https://github.com/ming86/cc-account-switcher)
+[![Shell](https://img.shields.io/badge/shell-bash%204.4%2B-89e051)](https://github.com/ming86/cc-account-switcher)
+[![Tests](https://img.shields.io/badge/tests-85%20passing-success)](https://github.com/ming86/cc-account-switcher/actions)
 
 A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL.
 
 ## Features
 
-- **Multi-account management**: Add, remove, and list Claude Code accounts
-- **Quick switching**: Switch between accounts with simple commands
-- **Cross-platform**: Works on macOS, Linux, and WSL
-- **Secure storage**: Uses system keychain (macOS) or protected files (Linux/WSL)
-- **Settings preservation**: Only switches authentication - your themes, settings, and preferences remain unchanged
+- **Multi-account management** — Add, remove, and list Claude Code accounts
+- **Quick switching** — Rotate accounts or switch to a specific one by number, email, or profile name
+- **Named profiles** — Give accounts friendly names like `work` or `personal`
+- **Directory-based auto-switching** — Map directories to accounts and auto-switch when you `cd`
+- **Dry-run mode** — Preview what a switch would do without making changes
+- **Rollback** — Automatic rollback if a switch fails mid-way
+- **Diagnostics** — Health checks, status, and per-account usage statistics
+- **Cross-platform** — Works on macOS, Linux, and WSL
+- **Secure storage** — Uses system keychain (macOS) or protected files (Linux/WSL)
+- **Settings preservation** — Only switches authentication; themes, settings, and preferences stay unchanged
 
 ## Installation
 
 ### curl (quickest)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ming86/cc-account-switcher/main/ccswitch.sh -o /usr/local/bin/ccswitch
-chmod +x /usr/local/bin/ccswitch
+curl -fsSL https://raw.githubusercontent.com/ming86/cc-account-switcher/main/ccswitch.sh -o /usr/local/bin/ccs
+chmod +x /usr/local/bin/ccs
 ```
 
 ### Homebrew (macOS)
@@ -49,64 +57,93 @@ sudo make install
 
 ### Manual
 
-Download `ccswitch.sh` from the [latest release](https://github.com/ming86/cc-account-switcher/releases) and place it in your `$PATH`.
+Download `ccswitch.sh` from the [latest release](https://github.com/ming86/cc-account-switcher/releases) and place it in your `$PATH` as `ccs`.
+
+## Quick Start
+
+1. Log into Claude Code with your first account
+2. `ccs add` — save current credentials
+3. Log out, log into your second account
+4. `ccs add` — save the second set of credentials
+5. `ccs sw` — rotate between accounts
+6. Restart Claude Code after each switch
+
+> **What gets switched:** Only authentication credentials. Your themes, settings, preferences, and chat history remain unchanged.
 
 ## Usage
 
-### Basic Commands
+### Account Management
 
 ```bash
-# Add current account to managed accounts
-ccswitch --add-account
-
-# List all managed accounts
-ccswitch --list
-
-# Switch to next account in sequence
-ccswitch --switch
-
-# Switch to specific account by number or email
-ccswitch --switch-to 2
-ccswitch --switch-to user2@example.com
-
-# Remove an account
-ccswitch --remove-account user2@example.com
-
-# Show help
-ccswitch --help
+ccs add                          # Add current account
+ccs ls                           # List all managed accounts
+ccs rm 2                         # Remove account by number
+ccs rm user@example.com          # Remove account by email
 ```
 
-### First Time Setup
+### Switching
 
-1. **Log into Claude Code** with your first account (make sure you're actively logged in)
-2. Run `ccswitch --add-account` to add it to managed accounts
-3. **Log out** and log into Claude Code with your second account
-4. Run `ccswitch --add-account` again
-5. Now you can switch between accounts with `ccswitch --switch`
-6. **Important**: After each switch, restart Claude Code to use the new authentication
+```bash
+ccs sw                           # Rotate to next account
+ccs to 2                         # Switch to account #2
+ccs to user@example.com          # Switch by email
+ccs to work                      # Switch by profile name
+ccs -n sw                        # Dry-run: preview what would happen
+ccs sw -r                        # Switch and restart Claude Code
+ccs sw --no-restart              # Switch without restart prompt
+```
 
-> **What gets switched:** Only your authentication credentials change. Your themes, settings, preferences, and chat history remain exactly the same.
+### Profiles
+
+```bash
+ccs profile 1 work               # Name account 1 "work"
+ccs profile 2 personal           # Name account 2 "personal"
+ccs to work                      # Then switch by profile name
+```
+
+### Directory-based Auto-switching
+
+```bash
+ccs dir ~/work 1                 # Map ~/work to account 1
+ccs dir ~/personal 2             # Map ~/personal to account 2
+ccs auto                         # Switch based on current directory
+```
+
+### Diagnostics
+
+```bash
+ccs check                        # Verify backup integrity (JSON, permissions, keychain)
+ccs status                       # Current account, token expiry, last switch
+ccs stats                        # Per-account usage statistics
+```
+
+### Other
+
+```bash
+ccs version                      # Show version
+ccs help                         # Show help
+```
 
 ### Shell Integration
 
-Add to your shell profile to enable completions and aliases:
+Add to your shell profile to enable completions and the `ccs` alias:
 
 **Bash** (`~/.bashrc`):
 
 ```bash
-source "$(command -v ccswitch)" --shell-init bash 2>/dev/null
+source "$(command -v ccs)" --shell-init bash 2>/dev/null
 ```
 
 **Zsh** (`~/.zshrc`):
 
 ```bash
-source "$(command -v ccswitch)" --shell-init zsh 2>/dev/null
+source "$(command -v ccs)" --shell-init zsh 2>/dev/null
 ```
 
 **Fish** (`~/.config/fish/config.fish`):
 
 ```fish
-source "$(command -v ccswitch)" --shell-init fish 2>/dev/null
+source "$(command -v ccs)" --shell-init fish 2>/dev/null
 ```
 
 ## Requirements
@@ -140,36 +177,29 @@ When switching accounts, it:
 1. Backs up the current account's authentication data
 2. Restores the target account's authentication data
 3. Updates Claude Code's authentication files
+4. Automatically rolls back if any step fails
 
 ## Troubleshooting
 
-### If a switch fails
+Run `ccs check` first — it verifies JSON validity, file permissions, and keychain entries.
 
-- Check that you have accounts added: `ccswitch --list`
-- Verify Claude Code is closed before switching
-- Try switching back to your original account
+### Common Issues
 
-### If you can't add an account
+| Problem | Solution |
+|---------|----------|
+| Switch fails | Run `ccs check` to diagnose. Ensure Claude Code is closed. |
+| Can't add account | Ensure you're logged into Claude Code. Verify `jq` is installed. |
+| Claude Code doesn't recognize new account | Restart Claude Code after switching, or use `ccs sw -r`. |
+| Not sure which account is active | Run `ccs ls` — the active account is marked. |
 
-- Make sure you're logged into Claude Code first
-- Check that you have `jq` installed
-- Verify you have write permissions to your home directory
+## Cleanup / Uninstall
 
-### If Claude Code doesn't recognize the new account
-
-- Make sure you restarted Claude Code after switching
-- Check the current account: `ccswitch --list` (look for "(active)")
-
-## Cleanup/Uninstall
-
-To stop using this tool and remove all data:
-
-1. Note your current active account: `ccswitch --list`
+1. Note your current active account: `ccs ls`
 2. Remove the backup directory: `rm -rf ~/.claude-switch-backup`
 3. Uninstall:
    - **make**: `sudo make uninstall`
    - **npm**: `npm uninstall -g cc-account-switcher`
-   - **manual**: `rm /usr/local/bin/ccswitch`
+   - **manual**: `rm /usr/local/bin/ccs`
 
 Your current Claude Code login will remain active.
 
@@ -177,12 +207,12 @@ Your current Claude Code login will remain active.
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## Security Notes
+## Security
 
-- Credentials stored in macOS Keychain or files with 600 permissions
-- Authentication files are stored with restricted permissions (600)
-- The tool requires Claude Code to be closed during account switches
+- macOS credentials stored in system Keychain
+- All backup files use `600` permissions (owner-only read/write)
+- Integrity checks via `ccs check`
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License — see [LICENSE](LICENSE) file for details.
