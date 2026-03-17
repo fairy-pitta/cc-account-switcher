@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> pre-push: syntax check"
+bash -n ccswitch.sh
+
+if command -v shellcheck >/dev/null 2>&1; then
+    echo "==> pre-push: shellcheck"
+    shellcheck ccswitch.sh
+fi
+
+if command -v bats >/dev/null 2>&1; then
+    echo "==> pre-push: running tests"
+    bats test/
+else
+    echo "==> pre-push: bats not found, skipping tests"
+fi

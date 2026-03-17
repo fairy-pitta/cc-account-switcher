@@ -4,7 +4,7 @@ BASH_COMPLETIONDIR ?= $(PREFIX)/share/bash-completion/completions
 ZSH_COMPLETIONDIR ?= $(PREFIX)/share/zsh/site-functions
 FISH_COMPLETIONDIR ?= $(PREFIX)/share/fish/vendor_completions.d
 
-.PHONY: install uninstall test lint release help
+.PHONY: install uninstall test lint release setup help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -58,6 +58,10 @@ lint: ## Run shellcheck
 		echo "Install with: brew install shellcheck (macOS) or apt install shellcheck (Linux)"; \
 		exit 1; \
 	fi
+
+setup: ## Set up dev environment (git hooks)
+	git config core.hooksPath .githooks
+	@echo "Git hooks configured (.githooks/)."
 
 release: ## Create a release (usage: make release VERSION=x.y.z)
 ifndef VERSION
