@@ -1,0 +1,38 @@
+{
+  "name": "cc-account-switcher",
+  "version": "0.2.0",
+  "description": "A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL",
+  "bin": {
+    "ccswitch": "./bin/ccswitch"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "account-switcher",
+    "multi-account"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ming86/cc-account-switcher.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ming86/cc-account-switcher/issues"
+  },
+  "homepage": "https://github.com/ming86/cc-account-switcher#readme",
+  "engines": {
+    "node": ">=16"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "files": [
+    "ccswitch.sh",
+    "bin/ccswitch",
+    "completions/",
+    "plugins/",
+    "README.md",
+    "LICENSE"
+  ]
+}
