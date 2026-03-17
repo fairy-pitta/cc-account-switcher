@@ -85,13 +85,9 @@ teardown() {
     run jq . "$test_file"
     [ "$status" -eq 0 ]
 
-    # Verify permissions are 600
+    # Verify permissions are 600 (try GNU stat first, then BSD stat)
     local perms
-    if [[ "$(uname)" == "Darwin" ]]; then
-        perms=$(stat -f '%A' "$test_file")
-    else
-        perms=$(stat -c '%a' "$test_file")
-    fi
+    perms=$(stat -c '%a' "$test_file" 2>/dev/null) || perms=$(stat -f '%A' "$test_file" 2>/dev/null)
     [ "$perms" = "600" ]
 }
 
