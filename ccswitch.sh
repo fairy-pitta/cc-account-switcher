@@ -149,13 +149,11 @@ check_bash_version() {
 
 # Check dependencies
 check_dependencies() {
-    for cmd in jq; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then
-            echo "Error: Required command '$cmd' not found"
-            echo "Install with: apt install $cmd (Linux) or brew install $cmd (macOS)"
-            exit 1
-        fi
-    done
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "Error: Required command 'jq' not found"
+        echo "Install with: apt install jq (Linux) or brew install jq (macOS)"
+        exit 1
+    fi
 }
 
 # Setup backup directories
@@ -309,7 +307,8 @@ write_account_config() {
 # Initialize sequence.json if it doesn't exist
 init_sequence_file() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
-        local init_content='{
+        local init_content
+        init_content='{
   "activeAccountNumber": null,
   "lastUpdated": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
   "sequence": [],
@@ -1053,7 +1052,7 @@ cmd_switch() {
 
     local active_account sequence
     active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    sequence=($(jq -r '.sequence[]' "$SEQUENCE_FILE"))
+    IFS=$'\n' read -r -d '' -a sequence < <(jq -r '.sequence[]' "$SEQUENCE_FILE") || true
 
     # Find next account in sequence
     local next_account current_index=0
@@ -1193,8 +1192,7 @@ perform_switch() {
 
     # Merge with current config and validate
     local merged_config
-    merged_config=$(jq --argjson oauth "$oauth_section" '.oauthAccount = $oauth' "$(get_claude_config_path)" 2>/dev/null)
-    if [[ $? -ne 0 ]]; then
+    if ! merged_config=$(jq --argjson oauth "$oauth_section" '.oauthAccount = $oauth' "$(get_claude_config_path)" 2>/dev/null); then
         echo "Error: Failed to merge config"
         rollback
         exit 1
