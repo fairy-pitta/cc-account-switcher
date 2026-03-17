@@ -1,11 +1,13 @@
 # Multi-Account Switcher for Claude Code
 
-[![CI](https://github.com/ming86/cc-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/ming86/cc-account-switcher/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/ming86/cc-account-switcher?style=flat&color=blue)](https://github.com/ming86/cc-account-switcher/releases)
+[![CI](https://github.com/fairy-pitta/cc-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/fairy-pitta/cc-account-switcher/actions/workflows/ci.yml)
+[![GitHub release](https://img.shields.io/github/v/release/ming86/cc-account-switcher?style=flat&color=blue)](https://github.com/fairy-pitta/cc-account-switcher/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-brightgreen)](https://github.com/ming86/cc-account-switcher)
-[![Shell](https://img.shields.io/badge/shell-bash%204.4%2B-89e051)](https://github.com/ming86/cc-account-switcher)
-[![Tests](https://img.shields.io/badge/tests-85%20passing-success)](https://github.com/ming86/cc-account-switcher/actions)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-brightgreen)](https://github.com/fairy-pitta/cc-account-switcher)
+[![Shell](https://img.shields.io/badge/shell-bash%204.4%2B-89e051)](https://github.com/fairy-pitta/cc-account-switcher)
+[![Tests](https://img.shields.io/badge/tests-85%20passing-success)](https://github.com/fairy-pitta/cc-account-switcher/actions)
+
+> Forked from [ming86/cc-account-switcher](https://github.com/ming86/cc-account-switcher) — thank you for the original work!
 
 A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL.
 
@@ -50,14 +52,14 @@ npx cc-account-switcher --help
 ### Make
 
 ```bash
-git clone https://github.com/ming86/cc-account-switcher.git
+git clone https://github.com/fairy-pitta/cc-account-switcher.git
 cd cc-account-switcher
 sudo make install
 ```
 
 ### Manual
 
-Download `ccswitch.sh` from the [latest release](https://github.com/ming86/cc-account-switcher/releases) and place it in your `$PATH` as `ccs`.
+Download `ccswitch.sh` from the [latest release](https://github.com/fairy-pitta/cc-account-switcher/releases) and place it in your `$PATH` as `ccs`.
 
 ## Quick Start
 
@@ -212,6 +214,10 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 - macOS credentials stored in system Keychain
 - All backup files use `600` permissions (owner-only read/write)
 - Integrity checks via `ccs check`
+
+## Acknowledgments
+
+This project is a fork of [ming86/cc-account-switcher](https://github.com/ming86/cc-account-switcher). Thanks to the original author for building the foundation of multi-account switching for Claude Code.
 
 ## License
 
