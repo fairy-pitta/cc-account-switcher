@@ -87,7 +87,11 @@ teardown() {
 
     # Verify permissions are 600
     local perms
-    perms=$(stat -f '%A' "$test_file" 2>/dev/null || stat -c '%a' "$test_file" 2>/dev/null)
+    if [[ "$(uname)" == "Darwin" ]]; then
+        perms=$(stat -f '%A' "$test_file")
+    else
+        perms=$(stat -c '%a' "$test_file")
+    fi
     [ "$perms" = "600" ]
 }
 
