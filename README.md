@@ -1,7 +1,7 @@
 # Multi-Account Switcher for Claude Code
 
 [![CI](https://github.com/fairy-pitta/cc-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/fairy-pitta/cc-account-switcher/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/ming86/cc-account-switcher?style=flat&color=blue)](https://github.com/fairy-pitta/cc-account-switcher/releases)
+[![GitHub release](https://img.shields.io/github/v/release/fairy-pitta/cc-account-switcher?style=flat&color=blue)](https://github.com/fairy-pitta/cc-account-switcher/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-brightgreen)](https://github.com/fairy-pitta/cc-account-switcher)
 [![Shell](https://img.shields.io/badge/shell-bash%204.0%2B-89e051)](https://github.com/fairy-pitta/cc-account-switcher)
@@ -10,6 +10,10 @@
 > Forked from [ming86/cc-account-switcher](https://github.com/ming86/cc-account-switcher) — thank you for the original work!
 
 A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL.
+
+## Demo
+
+![demo](assets/demo.gif)
 
 ## Features
 
@@ -26,17 +30,19 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 
 ## Installation
 
+![install](assets/install.gif)
+
 ### curl (quickest)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ming86/cc-account-switcher/main/ccswitch.sh -o /usr/local/bin/ccs
+curl -fsSL https://raw.githubusercontent.com/fairy-pitta/cc-account-switcher/main/ccswitch.sh -o /usr/local/bin/ccs
 chmod +x /usr/local/bin/ccs
 ```
 
 ### Homebrew (macOS)
 
 ```bash
-brew install ming86/tap/ccswitch
+brew install fairy-pitta/tap/ccswitch
 ```
 
 ### npm / npx
@@ -62,6 +68,8 @@ sudo make install
 Download `ccswitch.sh` from the [latest release](https://github.com/fairy-pitta/cc-account-switcher/releases) and place it in your `$PATH` as `ccs`.
 
 ## Quick Start
+
+![quickstart](assets/quickstart.gif)
 
 1. Log into Claude Code with your first account
 2. `ccs add` — save current credentials
