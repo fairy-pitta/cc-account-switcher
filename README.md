@@ -1,7 +1,7 @@
 # Multi-Account Switcher for Claude Code
 
 [![CI](https://github.com/fairy-pitta/cc-account-switcher/actions/workflows/ci.yml/badge.svg)](https://github.com/fairy-pitta/cc-account-switcher/actions/workflows/ci.yml)
-[![GitHub release](https://img.shields.io/github/v/release/ming86/cc-account-switcher?style=flat&color=blue)](https://github.com/fairy-pitta/cc-account-switcher/releases)
+[![GitHub release](https://img.shields.io/github/v/release/fairy-pitta/cc-account-switcher?style=flat&color=blue)](https://github.com/fairy-pitta/cc-account-switcher/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-brightgreen)](https://github.com/fairy-pitta/cc-account-switcher)
 [![Shell](https://img.shields.io/badge/shell-bash%204.4%2B-89e051)](https://github.com/fairy-pitta/cc-account-switcher)
@@ -35,14 +35,14 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 ### curl (quickest)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ming86/cc-account-switcher/main/ccswitch.sh -o /usr/local/bin/ccs
+curl -fsSL https://raw.githubusercontent.com/fairy-pitta/cc-account-switcher/main/ccswitch.sh -o /usr/local/bin/ccs
 chmod +x /usr/local/bin/ccs
 ```
 
 ### Homebrew (macOS)
 
 ```bash
-brew install ming86/tap/ccswitch
+brew install fairy-pitta/tap/ccswitch
 ```
 
 ### npm / npx
