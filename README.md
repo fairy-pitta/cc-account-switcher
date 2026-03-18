@@ -11,6 +11,10 @@
 
 A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL.
 
+## Demo
+
+![demo](assets/demo.gif)
+
 ## Features
 
 - **Multi-account management** — Add, remove, and list Claude Code accounts
