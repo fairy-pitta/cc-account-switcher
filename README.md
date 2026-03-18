@@ -30,6 +30,8 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 
 ## Installation
 
+![install](assets/install.gif)
+
 ### curl (quickest)
 
 ```bash
@@ -66,6 +68,8 @@ sudo make install
 Download `ccswitch.sh` from the [latest release](https://github.com/fairy-pitta/cc-account-switcher/releases) and place it in your `$PATH` as `ccs`.
 
 ## Quick Start
+
+![quickstart](assets/quickstart.gif)
 
 1. Log into Claude Code with your first account
 2. `ccs add` — save current credentials
