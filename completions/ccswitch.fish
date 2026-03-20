@@ -20,7 +20,7 @@ function __ccs_needs_command
     for c in $cmd[2..-1]
         switch $c
             case 'add' 'rm' 'ls' 'sw' 'to' 'profile' 'dir' 'auto' \
-                 'check' 'status' 'stats' 'version' 'help'
+                 'rate-check' 'rate-setup' 'check' 'status' 'stats' 'version' 'help'
                 return 1
         end
     end
@@ -53,6 +53,8 @@ complete -c ccs -n '__ccs_needs_command' -a 'auto' -d 'Switch based on current d
 complete -c ccs -n '__ccs_needs_command' -a 'check' -d 'Check account configuration health'
 complete -c ccs -n '__ccs_needs_command' -a 'status' -d 'Show current account status'
 complete -c ccs -n '__ccs_needs_command' -a 'stats' -d 'Show account usage statistics'
+complete -c ccs -n '__ccs_needs_command' -a 'rate-check' -d 'Check if usage exceeds rate limit'
+complete -c ccs -n '__ccs_needs_command' -a 'rate-setup' -d 'Install/remove auto-switch hook'
 complete -c ccs -n '__ccs_needs_command' -a 'version' -d 'Show version information'
 complete -c ccs -n '__ccs_needs_command' -a 'help' -d 'Show help message'
 
