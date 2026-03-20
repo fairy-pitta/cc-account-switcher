@@ -55,25 +55,3 @@ teardown() {
     [[ "$output" == *"Required command 'jq' not found"* ]]
 }
 
-@test "test_bash_version_check_passes_with_mock" {
-    # Our mock bash reports 5.2, so version check should pass
-    run run_ccswitch --help
-    [ "$status" -eq 0 ]
-}
-
-@test "test_bash_version_check_fails_with_old_bash" {
-    # Create a mock bash that reports an old version
-    cat > "$MOCK_BIN/bash" << 'EOF'
-#!/bin/bash
-if [[ "$1" == "--version" ]]; then
-    echo "GNU bash, version 3.1.0(1)-release (x86_64-pc-linux-gnu)"
-    exit 0
-fi
-exec /bin/bash "$@"
-EOF
-    chmod +x "$MOCK_BIN/bash"
-
-    run run_ccswitch --help
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"Bash 4.4+ required"* ]]
-}

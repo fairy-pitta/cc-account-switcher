@@ -137,16 +137,6 @@ write_json() {
     chmod 600 "$file"
 }
 
-# Check Bash version (4.4+ required)
-check_bash_version() {
-    local version
-    version=$(bash --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
-    if ! awk -v ver="$version" 'BEGIN { exit (ver >= 4.4 ? 0 : 1) }'; then
-        echo "Error: Bash 4.4+ required (found $version)"
-        exit 1
-    fi
-}
-
 # Check dependencies
 check_dependencies() {
     if ! command -v jq >/dev/null 2>&1; then
@@ -1050,20 +1040,13 @@ cmd_switch() {
 
     # wait_for_claude_close
 
-    local active_account sequence
+    local active_account next_account
     active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    IFS=$'\n' read -r -d '' -a sequence < <(jq -r '.sequence[]' "$SEQUENCE_FILE") || true
-
-    # Find next account in sequence
-    local next_account current_index=0
-    for i in "${!sequence[@]}"; do
-        if [[ "${sequence[i]}" == "$active_account" ]]; then
-            current_index=$i
-            break
-        fi
-    done
-
-    next_account="${sequence[$(((current_index + 1) % ${#sequence[@]}))]}"
+    next_account=$(jq -r --argjson active "$active_account" '
+        .sequence as $seq |
+        ($seq | index($active) // 0) as $idx |
+        $seq[($idx + 1) % ($seq | length)]
+    ' "$SEQUENCE_FILE")
 
     perform_switch "$next_account"
 }
@@ -1315,7 +1298,6 @@ main() {
         exit 1
     fi
 
-    check_bash_version
     check_dependencies
 
     # Parse global flags first, collect remaining args

@@ -160,7 +160,7 @@ source "$(command -v ccs)" --shell-init fish 2>/dev/null
 
 ## 動作要件
 
-- Bash 4.4+
+- Bash 3.2+
 - `jq`（JSON プロセッサ）
 
 ### 依存パッケージのインストール
