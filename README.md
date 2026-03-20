@@ -25,6 +25,7 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 - **Directory-based auto-switching** — Map directories to accounts and auto-switch when you `cd`
 - **Dry-run mode** — Preview what a switch would do without making changes
 - **Rollback** — Automatic rollback if a switch fails mid-way
+- **Rate limit auto-switch** — Automatically switch accounts when usage limits are hit, via Claude Code hooks
 - **Diagnostics** — Health checks, status, and per-account usage statistics
 - **Cross-platform** — Works on macOS, Linux, and WSL
 - **Secure storage** — Uses system keychain (macOS) or protected files (Linux/WSL)
@@ -120,6 +121,32 @@ ccs dir ~/work 1                 # Map ~/work to account 1
 ccs dir ~/personal 2             # Map ~/personal to account 2
 ccs auto                         # Switch based on current directory
 ```
+
+### Rate Limit Auto-switch
+
+Automatically switch to the next account when your 5-hour usage exceeds a threshold. Uses Claude Code's [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks) system — no polling, no background processes.
+
+```bash
+# Set up (one-time) — installs a PreToolUse hook into Claude Code
+ccs rate-setup                   # Enable with default 80% threshold
+ccs rate-setup --threshold 70    # Custom threshold
+
+# Manual check
+ccs rate-check                   # Check current usage vs threshold
+ccs rate-check --auto-switch     # Check and switch if exceeded
+
+# Disable
+ccs rate-setup --disable         # Remove hook and disable
+```
+
+**How it works:**
+
+1. Your statusline script calls the Anthropic Usage API and caches data to `/tmp/claude-usage-cache.json`
+2. Before each tool call, the PreToolUse hook reads the cache (~20ms, no API calls)
+3. If usage exceeds the threshold, it switches to the next account and tells Claude Code to deny the tool call with a "please restart" message
+4. All errors fail open — a broken hook never blocks your work
+
+**Prerequisites:** A statusline script that keeps `/tmp/claude-usage-cache.json` warm with data from the [Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage). The cache should contain `five_hour.utilization` (0-100).
 
 ### Diagnostics
 
