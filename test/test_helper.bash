@@ -251,6 +251,23 @@ EOF
     security add-generic-password -U -s "Claude Code-Account-${account_num}-${email}" -a "$USER" -w "$creds"
 }
 
+# Helper: create a fake usage cache at /tmp/claude-usage-cache.json
+create_fake_usage_cache() {
+    local utilization="${1:-50}"
+    local email="${2:-user1@example.com}"
+    cat > /tmp/claude-usage-cache.json <<EOF
+{
+  "five_hour": {
+    "utilization": $utilization,
+    "limit": 100,
+    "used": $utilization
+  },
+  "active_account": "$email",
+  "cached_at": $(date +%s)
+}
+EOF
+}
+
 # Source ccswitch.sh functions for direct function testing
 source_ccswitch_functions() {
     # Source with set +e to avoid early exit from set -euo pipefail in script
