@@ -33,7 +33,7 @@ _ccswitch() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # All available subcommands and options
-    local commands="add rm ls sw to profile dir auto check status stats version help -n -r --dry-run --restart --no-restart"
+    local commands="add rm ls sw to profile dir auto rate-check rate-setup check status stats version help -n -r --dry-run --restart --no-restart"
 
     case "$prev" in
         to|--switch-to|rm|--remove-account|profile|--set-profile)

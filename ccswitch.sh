@@ -1125,12 +1125,20 @@ perform_switch() {
 
     # Rollback function
     rollback() {
-        echo ""
-        echo "Error: Switch failed. Rolling back to previous state..."
+        if [[ "${CCS_SILENT:-}" != "1" ]]; then
+            echo ""
+            echo "Error: Switch failed. Rolling back to previous state..."
+        else
+            echo "Error: Switch failed. Rolling back..." >&2
+        fi
         write_credentials "$rollback_creds" 2>/dev/null || true
         write_json "$(get_claude_config_path)" "$rollback_config" 2>/dev/null || true
         write_json "$SEQUENCE_FILE" "$rollback_sequence" 2>/dev/null || true
-        echo "Rollback complete. Account-$current_account ($current_email) is still active."
+        if [[ "${CCS_SILENT:-}" != "1" ]]; then
+            echo "Rollback complete. Account-$current_account ($current_email) is still active."
+        else
+            echo "Rollback complete." >&2
+        fi
     }
 
     # Step 1: Backup current account
@@ -1233,13 +1241,416 @@ perform_switch() {
         exit 1
     fi
 
-    echo "Switched to Account-$target_account ($target_email)"
-    # Display updated account list
-    cmd_list
-    echo ""
+    if [[ "${CCS_SILENT:-}" != "1" ]]; then
+        echo "Switched to Account-$target_account ($target_email)"
+        # Display updated account list
+        cmd_list
+        echo ""
 
-    # Handle restart
-    handle_restart_after_switch
+        # Handle restart
+        handle_restart_after_switch
+    fi
+}
+
+# Fetch usage data from Anthropic OAuth Usage API
+# Writes to /tmp/claude-usage-cache.json with active_account field
+# Returns 0 on success, 1 on failure
+fetch_usage_data() {
+    local cache_file="/tmp/claude-usage-cache.json"
+    local current_email
+    current_email=$(get_current_account)
+
+    # Read credentials and extract access token
+    local creds access_token
+    creds=$(read_credentials)
+    if [[ -z "$creds" ]]; then
+        return 1
+    fi
+
+    access_token=$(echo "$creds" | jq -r '.access_token // empty' 2>/dev/null)
+    if [[ -z "$access_token" ]]; then
+        return 1
+    fi
+
+    # Call the usage API
+    local response http_code
+    response=$(curl -sS -w "\n%{http_code}" \
+        -H "Authorization: Bearer $access_token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        "https://api.anthropic.com/api/oauth/usage" 2>/dev/null) || return 1
+
+    http_code=$(echo "$response" | tail -n1)
+    local body
+    body=$(echo "$response" | sed '$d')
+
+    # Handle token refresh on 401
+    if [[ "$http_code" == "401" ]]; then
+        local refresh_token client_id
+        refresh_token=$(echo "$creds" | jq -r '.refresh_token // empty' 2>/dev/null)
+        client_id="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+        if [[ -z "$refresh_token" ]]; then
+            return 1
+        fi
+
+        local refresh_response refresh_code
+        refresh_response=$(curl -sS -w "\n%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"$refresh_token\",\"client_id\":\"$client_id\"}" \
+            "https://console.anthropic.com/v1/oauth/token" 2>/dev/null) || return 1
+
+        refresh_code=$(echo "$refresh_response" | tail -n1)
+        local refresh_body
+        refresh_body=$(echo "$refresh_response" | sed '$d')
+
+        if [[ "$refresh_code" != "200" ]]; then
+            return 1
+        fi
+
+        # Update stored credentials with new tokens
+        local new_access new_refresh updated_creds
+        new_access=$(echo "$refresh_body" | jq -r '.access_token // empty' 2>/dev/null)
+        new_refresh=$(echo "$refresh_body" | jq -r '.refresh_token // empty' 2>/dev/null)
+
+        if [[ -z "$new_access" ]]; then
+            return 1
+        fi
+
+        updated_creds=$(echo "$creds" | jq \
+            --arg at "$new_access" \
+            --arg rt "${new_refresh:-$refresh_token}" \
+            '.access_token = $at | .refresh_token = $rt' 2>/dev/null)
+        write_credentials "$updated_creds"
+
+        # Retry the usage API with new token
+        response=$(curl -sS -w "\n%{http_code}" \
+            -H "Authorization: Bearer $new_access" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            "https://api.anthropic.com/api/oauth/usage" 2>/dev/null) || return 1
+
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+    fi
+
+    if [[ "$http_code" != "200" ]]; then
+        return 1
+    fi
+
+    # Validate response JSON
+    if ! echo "$body" | jq . >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # Write cache with active_account and timestamp
+    local cache_content
+    cache_content=$(echo "$body" | jq \
+        --arg email "$current_email" \
+        --arg ts "$(date +%s)" \
+        '. + {active_account: $email, cached_at: ($ts | tonumber)}' 2>/dev/null) || return 1
+
+    echo "$cache_content" > "$cache_file"
+    return 0
+}
+
+# Rate limit check command
+# Usage: ccs rate-check [--threshold N] [--auto-switch] [--hook-mode] [--refresh]
+# Exit codes: 0=ok, 1=exceeded (switched if --auto-switch), 2=error, 3=all accounts limited
+cmd_rate_check() {
+    local threshold=80
+    local auto_switch=false
+    local hook_mode=false
+    local refresh=false
+    local cache_file="/tmp/claude-usage-cache.json"
+
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --threshold)
+                threshold="$2"
+                shift 2
+                ;;
+            --auto-switch)
+                auto_switch=true
+                shift
+                ;;
+            --hook-mode)
+                hook_mode=true
+                shift
+                ;;
+            --refresh)
+                refresh=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Read threshold from config if not overridden by flag
+    if [[ -f "$SEQUENCE_FILE" ]]; then
+        local cfg_threshold
+        cfg_threshold=$(jq -r '.rateLimit.threshold // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+        # Only use config threshold if --threshold was not explicitly passed
+        if [[ -n "$cfg_threshold" && "$threshold" -eq 80 ]]; then
+            threshold="$cfg_threshold"
+        fi
+    fi
+
+    # Force refresh if requested
+    if [[ "$refresh" == true ]]; then
+        fetch_usage_data || {
+            if [[ "$hook_mode" == true ]]; then
+                exit 0  # Fail open
+            fi
+            echo "Error: Failed to fetch usage data" >&2
+            exit 2
+        }
+    fi
+
+    # Check cache exists
+    if [[ ! -f "$cache_file" ]]; then
+        if [[ "$hook_mode" == true ]]; then
+            exit 0  # Fail open
+        fi
+        echo "Error: No usage cache found at $cache_file" >&2
+        exit 2
+    fi
+
+    # Validate active_account matches current account
+    local current_email cached_account
+    current_email=$(get_current_account)
+    cached_account=$(jq -r '.active_account // empty' "$cache_file" 2>/dev/null || true)
+
+    if [[ -n "$cached_account" && "$cached_account" != "$current_email" ]]; then
+        # Cache is stale (different account), try to refresh
+        if fetch_usage_data; then
+            : # Cache refreshed successfully
+        else
+            if [[ "$hook_mode" == true ]]; then
+                exit 0  # Fail open
+            fi
+            echo "Error: Cache account mismatch and refresh failed" >&2
+            exit 2
+        fi
+    fi
+
+    # Read utilization
+    local usage usage_int
+    usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
+    usage_int=$(printf "%.0f" "$usage" 2>/dev/null || echo "0")
+
+    # Below threshold — all good
+    if [[ "$usage_int" -lt "$threshold" ]]; then
+        if [[ "$hook_mode" != true ]]; then
+            echo "Usage: ${usage_int}% (threshold: ${threshold}%) — OK"
+        fi
+        exit 0
+    fi
+
+    # Above threshold
+    if [[ "$hook_mode" != true ]]; then
+        echo "Usage: ${usage_int}% exceeds threshold ${threshold}%"
+    fi
+
+    if [[ "$auto_switch" == true ]]; then
+        if [[ ! -f "$SEQUENCE_FILE" ]]; then
+            if [[ "$hook_mode" == true ]]; then
+                exit 0  # Fail open
+            fi
+            echo "Error: No accounts configured" >&2
+            exit 2
+        fi
+
+        local total_accounts
+        total_accounts=$(jq '.sequence | length' "$SEQUENCE_FILE" 2>/dev/null || echo "0")
+
+        if [[ "$total_accounts" -lt 2 ]]; then
+            if [[ "$hook_mode" == true ]]; then
+                _rate_hook_deny "Rate limit exceeded (${usage_int}%). No other accounts to switch to."
+                exit 0
+            fi
+            echo "Only one account configured, cannot auto-switch" >&2
+            exit 3
+        fi
+
+        # Try switching to next accounts (up to N-1 attempts)
+        local attempts=0
+        local max_attempts=$((total_accounts - 1))
+
+        while [[ $attempts -lt $max_attempts ]]; do
+            local active_account next_account next_email
+            active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+            next_account=$(jq -r --argjson active "$active_account" '
+                .sequence as $seq |
+                ($seq | index($active) // 0) as $idx |
+                $seq[($idx + 1) % ($seq | length)]
+            ' "$SEQUENCE_FILE")
+            next_email=$(jq -r --arg num "$next_account" '.accounts[$num].email' "$SEQUENCE_FILE")
+
+            # Perform switch in subshell to catch exit 1 from perform_switch
+            if ! (CCS_SILENT=1 perform_switch "$next_account"); then
+                # Switch failed — fail open in hook mode
+                if [[ "$hook_mode" == true ]]; then
+                    exit 0
+                fi
+                echo "Error: Failed to switch to Account-$next_account ($next_email)" >&2
+                exit 2
+            fi
+
+            # Invalidate cache and re-fetch for new account
+            rm -f "$cache_file"
+            if fetch_usage_data; then
+                local new_usage new_usage_int
+                new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
+                new_usage_int=$(printf "%.0f" "$new_usage" 2>/dev/null || echo "0")
+
+                if [[ "$new_usage_int" -lt "$threshold" ]]; then
+                    # Successfully switched to an account under the threshold
+                    if [[ "$hook_mode" == true ]]; then
+                        _rate_hook_deny "Rate limit exceeded. Switched to Account-$next_account ($next_email). Please restart Claude Code."
+                        exit 0
+                    fi
+                    echo "Switched to Account-$next_account ($next_email) — usage: ${new_usage_int}%"
+                    exit 1
+                fi
+            else
+                # Can't verify new account's usage, assume it's OK
+                if [[ "$hook_mode" == true ]]; then
+                    _rate_hook_deny "Rate limit exceeded. Switched to Account-$next_account ($next_email). Please restart Claude Code."
+                    exit 0
+                fi
+                echo "Switched to Account-$next_account ($next_email) — could not verify usage"
+                exit 1
+            fi
+
+            attempts=$((attempts + 1))
+        done
+
+        # All accounts are limited
+        if [[ "$hook_mode" == true ]]; then
+            _rate_hook_deny "Rate limit exceeded on all accounts (${usage_int}%). Please wait for limits to reset."
+            exit 0
+        fi
+        echo "All accounts are above the threshold" >&2
+        exit 3
+    fi
+
+    # No auto-switch, just report
+    if [[ "$hook_mode" == true ]]; then
+        _rate_hook_deny "Rate limit exceeded (${usage_int}%). Run 'ccs sw' to switch accounts."
+        exit 0
+    fi
+    exit 1
+}
+
+# Output hook-protocol JSON to deny a tool call
+_rate_hook_deny() {
+    local reason="$1"
+    cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"$reason"}}
+EOF
+}
+
+# Rate limit auto-switch setup
+# Usage: ccs rate-setup [--threshold N] [--disable]
+cmd_rate_setup() {
+    local threshold=80
+    local disable=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --threshold)
+                threshold="$2"
+                shift 2
+                ;;
+            --disable)
+                disable=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    setup_directories
+    init_sequence_file
+
+    local settings_file="$HOME/.claude/settings.local.json"
+
+    # Determine hook script path
+    local hook_script
+    hook_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooks/ccs-rate-hook.sh"
+
+    if [[ "$disable" == true ]]; then
+        # Disable: update config and remove hook
+        local updated
+        updated=$(jq '.rateLimit = {enabled: false}' "$SEQUENCE_FILE" 2>/dev/null)
+        write_json "$SEQUENCE_FILE" "$updated"
+
+        # Remove hook from settings.local.json if present
+        if [[ -f "$settings_file" ]]; then
+            local cleaned
+            cleaned=$(jq --arg hook "$hook_script" '
+                if .hooks and .hooks.PreToolUse then
+                    .hooks.PreToolUse = [.hooks.PreToolUse[] | select(.command != $hook)]
+                else . end
+            ' "$settings_file" 2>/dev/null)
+            if [[ -n "$cleaned" ]]; then
+                echo "$cleaned" | jq . > "$settings_file"
+            fi
+        fi
+
+        echo "Rate limit auto-switch disabled."
+        echo "Hook removed from $settings_file"
+        return
+    fi
+
+    # Enable: update config
+    local updated
+    updated=$(jq --argjson thresh "$threshold" '
+        .rateLimit = {enabled: true, threshold: $thresh}
+    ' "$SEQUENCE_FILE" 2>/dev/null)
+    write_json "$SEQUENCE_FILE" "$updated"
+
+    # Check hook script exists
+    if [[ ! -f "$hook_script" ]]; then
+        echo "Warning: Hook script not found at $hook_script"
+        echo "Make sure you have the hooks/ccs-rate-hook.sh file installed."
+        return 1
+    fi
+
+    # Install hook into settings.local.json
+    mkdir -p "$(dirname "$settings_file")"
+    if [[ ! -f "$settings_file" ]]; then
+        echo '{}' > "$settings_file"
+    fi
+
+    # Check if hook already exists (idempotent)
+    local hook_exists
+    hook_exists=$(jq --arg hook "$hook_script" '
+        .hooks.PreToolUse // [] | map(select(.command == $hook)) | length
+    ' "$settings_file" 2>/dev/null || echo "0")
+
+    if [[ "$hook_exists" == "0" ]]; then
+        local with_hook
+        with_hook=$(jq --arg hook "$hook_script" '
+            .hooks.PreToolUse = (.hooks.PreToolUse // []) + [
+                {
+                    "matcher": "",
+                    "command": $hook
+                }
+            ]
+        ' "$settings_file" 2>/dev/null)
+        echo "$with_hook" | jq . > "$settings_file"
+    fi
+
+    echo "Rate limit auto-switch enabled."
+    echo "  Threshold: ${threshold}%"
+    echo "  Hook script: $hook_script"
+    echo "  Settings: $settings_file"
 }
 
 # Show usage
@@ -1262,6 +1673,11 @@ show_usage() {
     echo "Directory-based Switching:"
     echo "  dir [dir] <num|email|profile>    Associate a directory with an account"
     echo "  auto                             Switch based on current directory mapping"
+    echo ""
+    echo "Rate Limiting:"
+    echo "  rate-check [--threshold N]       Check if usage exceeds threshold"
+    echo "  rate-setup [--threshold N]       Install PreToolUse hook for auto-switch"
+    echo "  rate-setup --disable             Remove hook and disable auto-switch"
     echo ""
     echo "Diagnostics:"
     echo "  check                            Verify backup integrity (JSON, permissions, keychain)"
@@ -1354,6 +1770,14 @@ main() {
             ;;
         auto|--auto-switch)
             cmd_auto_switch
+            ;;
+        rate-check)
+            shift
+            cmd_rate_check "$@"
+            ;;
+        rate-setup)
+            shift
+            cmd_rate_setup "$@"
             ;;
         check|--check)
             cmd_check

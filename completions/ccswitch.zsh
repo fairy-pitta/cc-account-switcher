@@ -49,6 +49,8 @@ _ccswitch() {
         'check:Verify backup integrity (JSON, permissions, keychain)'
         'status:Show current account, token expiry, last switch'
         'stats:Show per-account usage statistics'
+        'rate-check:Check if usage exceeds rate limit threshold'
+        'rate-setup:Install/remove PreToolUse hook for auto-switch'
         'version:Show version information'
         'help:Show help message'
     )
