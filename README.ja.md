@@ -4,7 +4,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/fairy-pitta/cc-account-switcher?style=flat&color=blue)](https://github.com/fairy-pitta/cc-account-switcher/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL-brightgreen)](https://github.com/fairy-pitta/cc-account-switcher)
-[![Shell](https://img.shields.io/badge/shell-bash%204.4%2B-89e051)](https://github.com/fairy-pitta/cc-account-switcher)
+[![Shell](https://img.shields.io/badge/shell-bash%203.2%2B-89e051)](https://github.com/fairy-pitta/cc-account-switcher)
 [![Tests](https://img.shields.io/badge/tests-85%20passing-success)](https://github.com/fairy-pitta/cc-account-switcher/actions)
 
 > [ming86/cc-account-switcher](https://github.com/ming86/cc-account-switcher) からのフォークです。オリジナルの開発者に感謝します！
