@@ -6,7 +6,7 @@ Thank you for your interest in contributing! This guide will help you get starte
 
 ### Prerequisites
 
-- **Bash 4.4+** - the script requires modern bash features
+- **Bash 4.0+** - the script requires modern bash features
 - **jq** - JSON processor (`brew install jq` or `apt install jq`)
 - **shellcheck** - static analysis for shell scripts (`brew install shellcheck` or `apt install shellcheck`)
 - **bats-core** - Bash Automated Testing System (`brew install bats-core` or `apt install bats`)

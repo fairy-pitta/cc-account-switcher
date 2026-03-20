@@ -75,5 +75,5 @@ EOF
 
     run run_ccswitch --help
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Bash 4.4+ required"* ]]
+    [[ "$output" == *"Bash 4.0+ required"* ]]
 }

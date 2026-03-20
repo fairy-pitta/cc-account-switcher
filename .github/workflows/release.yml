@@ -52,6 +52,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if gh release view "${{ github.ref_name }}" > /dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} already exists, skipping."
+            exit 0
+          fi
           gh release create "${{ github.ref_name }}" \
             --title "Release ${{ github.ref_name }}" \
             --notes-file release_notes.md \
