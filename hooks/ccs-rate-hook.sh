@@ -38,8 +38,12 @@ fi
 [[ $usage_int -lt $THRESHOLD ]] && exit 0
 
 # Threshold exceeded — delegate to ccs rate-check
-CCS=$(command -v ccs 2>/dev/null || echo "")
-[[ -z "$CCS" ]] && CCS="/usr/local/bin/ccs"
+# Resolve ccs: 1) CCS_PATH env (set by rate-setup), 2) sibling of this script's dir, 3) PATH, 4) common locations
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CCS="${CCS_PATH:-}"
+[[ -z "$CCS" || ! -x "$CCS" ]] && CCS="${SCRIPT_DIR}/../ccswitch.sh"
+[[ -x "$CCS" ]] || CCS=$(command -v ccs 2>/dev/null || echo "")
+[[ -z "$CCS" || ! -x "$CCS" ]] && CCS="/usr/local/bin/ccs"
 [[ -x "$CCS" ]] || { echo "ccs not found" >&2; exit 0; }
 
 # Run in subshell, capture output. On any failure → fail open

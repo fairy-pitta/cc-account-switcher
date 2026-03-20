@@ -1357,7 +1357,7 @@ fetch_usage_data() {
 # Usage: ccs rate-check [--threshold N] [--auto-switch] [--hook-mode] [--refresh]
 # Exit codes: 0=ok, 1=exceeded (switched if --auto-switch), 2=error, 3=all accounts limited
 cmd_rate_check() {
-    local threshold=80
+    local threshold=""
     local auto_switch=false
     local hook_mode=false
     local refresh=false
@@ -1388,14 +1388,17 @@ cmd_rate_check() {
         esac
     done
 
-    # Read threshold from config if not overridden by flag
-    if [[ -f "$SEQUENCE_FILE" ]]; then
-        local cfg_threshold
-        cfg_threshold=$(jq -r '.rateLimit.threshold // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
-        # Only use config threshold if --threshold was not explicitly passed
-        if [[ -n "$cfg_threshold" && "$threshold" -eq 80 ]]; then
-            threshold="$cfg_threshold"
+    # Read threshold from config if not explicitly passed via --threshold
+    if [[ -z "$threshold" ]]; then
+        if [[ -f "$SEQUENCE_FILE" ]]; then
+            local cfg_threshold
+            cfg_threshold=$(jq -r '.rateLimit.threshold // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+            if [[ -n "$cfg_threshold" ]]; then
+                threshold="$cfg_threshold"
+            fi
         fi
+        # Default if neither flag nor config provided
+        threshold="${threshold:-80}"
     fi
 
     # Force refresh if requested
@@ -1513,6 +1516,7 @@ cmd_rate_check() {
                         exit 0
                     fi
                     echo "Switched to Account-$next_account ($next_email) — usage: ${new_usage_int}%"
+                    handle_restart_after_switch
                     exit 1
                 fi
             else
@@ -1522,6 +1526,7 @@ cmd_rate_check() {
                     exit 0
                 fi
                 echo "Switched to Account-$next_account ($next_email) — could not verify usage"
+                handle_restart_after_switch
                 exit 1
             fi
 
@@ -1590,12 +1595,12 @@ cmd_rate_setup() {
         updated=$(jq '.rateLimit = {enabled: false}' "$SEQUENCE_FILE" 2>/dev/null)
         write_json "$SEQUENCE_FILE" "$updated"
 
-        # Remove hook from settings.local.json if present
+        # Remove hook from settings.local.json if present (match by hook script path)
         if [[ -f "$settings_file" ]]; then
             local cleaned
             cleaned=$(jq --arg hook "$hook_script" '
                 if .hooks and .hooks.PreToolUse then
-                    .hooks.PreToolUse = [.hooks.PreToolUse[] | select(.command != $hook)]
+                    .hooks.PreToolUse = [.hooks.PreToolUse[] | select(.command | contains($hook) | not)]
                 else . end
             ' "$settings_file" 2>/dev/null)
             if [[ -n "$cleaned" ]]; then
@@ -1628,15 +1633,22 @@ cmd_rate_setup() {
         echo '{}' > "$settings_file"
     fi
 
-    # Check if hook already exists (idempotent)
+    # Resolve absolute path to this script (ccs binary) for CCS_PATH
+    local ccs_bin
+    ccs_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+    # Build hook command with CCS_PATH so the hook can reliably find ccs
+    local hook_command="CCS_PATH=${ccs_bin} ${hook_script}"
+
+    # Check if hook already exists (idempotent) — match by hook script path
     local hook_exists
     hook_exists=$(jq --arg hook "$hook_script" '
-        .hooks.PreToolUse // [] | map(select(.command == $hook)) | length
+        .hooks.PreToolUse // [] | map(select(.command | contains($hook))) | length
     ' "$settings_file" 2>/dev/null || echo "0")
 
     if [[ "$hook_exists" == "0" ]]; then
         local with_hook
-        with_hook=$(jq --arg hook "$hook_script" '
+        with_hook=$(jq --arg hook "$hook_command" '
             .hooks.PreToolUse = (.hooks.PreToolUse // []) + [
                 {
                     "matcher": "",
