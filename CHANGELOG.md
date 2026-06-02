@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-02
+
 ### Added
 
 - `--allow-root` flag and `CCSWITCH_ALLOW_ROOT=1` environment variable to opt out of the root-execution guard for sandbox/testing use ([#13](https://github.com/fairy-pitta/cc-account-switcher/issues/13))
@@ -18,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ccs rate-check --auto-switch` — Check and switch if threshold exceeded
   - `hooks/ccs-rate-hook.sh` — Fail-open hook script for Claude Code integration
 - Homebrew formula for easy installation on macOS
-- npm package for installation via `npx cc-account-switcher`
+- npm package for installation via `npx @fairy-pitta/cc-account-switcher`
 - Makefile with install, uninstall, test, lint, and release targets
 - GitHub Actions CI workflow (shellcheck, bats, syntax check)
 - GitHub Actions release workflow with SHA256 checksums
@@ -51,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS Keychain integration
 - Linux credential file support
 
-[Unreleased]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fairy-pitta/cc-account-switcher/releases/tag/v0.1.0
