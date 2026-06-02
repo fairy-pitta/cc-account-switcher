@@ -52,10 +52,10 @@ brew install fairy-pitta/tap/ccswitch
 
 ```bash
 # グローバルインストール
-npm install -g cc-account-switcher
+npm install -g @fairy-pitta/cc-account-switcher
 
 # インストールせずに実行
-npx cc-account-switcher --help
+npx @fairy-pitta/cc-account-switcher --help
 ```
 
 ### Make
@@ -253,7 +253,7 @@ sudo apt install jq
 2. バックアップディレクトリを削除: `rm -rf ~/.claude-switch-backup`
 3. アンインストール:
    - **make**: `sudo make uninstall`
-   - **npm**: `npm uninstall -g cc-account-switcher`
+   - **npm**: `npm uninstall -g @fairy-pitta/cc-account-switcher`
    - **手動**: `rm /usr/local/bin/ccs`
 
 現在の Claude Code ログインはそのまま維持されます。

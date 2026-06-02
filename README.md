@@ -52,10 +52,10 @@ brew install fairy-pitta/tap/ccswitch
 
 ```bash
 # Install globally
-npm install -g cc-account-switcher
+npm install -g @fairy-pitta/cc-account-switcher
 
 # Or run without installing
-npx cc-account-switcher --help
+npx @fairy-pitta/cc-account-switcher --help
 ```
 
 ### Make
@@ -254,7 +254,7 @@ Run `ccs check` first — it verifies JSON validity, file permissions, and keych
 2. Remove the backup directory: `rm -rf ~/.claude-switch-backup`
 3. Uninstall:
    - **make**: `sudo make uninstall`
-   - **npm**: `npm uninstall -g cc-account-switcher`
+   - **npm**: `npm uninstall -g @fairy-pitta/cc-account-switcher`
    - **manual**: `rm /usr/local/bin/ccs`
 
 Your current Claude Code login will remain active.
