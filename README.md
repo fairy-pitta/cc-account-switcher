@@ -163,6 +163,23 @@ ccs version                      # Show version
 ccs help                         # Show help
 ```
 
+### Running as root
+
+By default the script refuses to run as `root`, because credentials and backups are
+stored per-user (under `$HOME` and, on macOS, the user's Keychain). Running as root
+targets a different home/Keychain and can leave root-owned files behind that break
+your normal user.
+
+If you understand the risks (e.g. sandbox or container testing), opt out with the
+`--allow-root` flag or the `CCSWITCH_ALLOW_ROOT=1` environment variable:
+
+```bash
+ccs --allow-root ls              # Flag (can go before or after the command)
+CCSWITCH_ALLOW_ROOT=1 ccs ls     # Environment variable
+```
+
+Containers are detected automatically and allowed without the flag.
+
 ### Shell Integration
 
 Add to your shell profile to enable completions and the `ccs` alias:

@@ -16,6 +16,13 @@ readonly DIR_ACCOUNTS_FILE="$BACKUP_DIR/dir-accounts.json"
 # Global flags (set during argument parsing)
 DRY_RUN=false
 RESTART_FLAG=""  # "", "restart", or "no-restart"
+# Allow running as root. Defaults from CCSWITCH_ALLOW_ROOT (1/true to enable),
+# can also be set with the --allow-root flag.
+if [[ "${CCSWITCH_ALLOW_ROOT:-}" == "1" || "${CCSWITCH_ALLOW_ROOT:-}" == "true" ]]; then
+    ALLOW_ROOT=true
+else
+    ALLOW_ROOT=false
+fi
 
 # Container detection
 is_running_in_container() {
@@ -40,6 +47,19 @@ is_running_in_container() {
     fi
 
     return 1
+}
+
+# Decide whether root execution should be blocked.
+# Args: <euid> <allow_root (true|false)>
+# Returns 0 (block) when running as root without an explicit opt-out, else 1.
+should_block_root() {
+    local euid="$1"
+    local allow_root="$2"
+
+    [[ "$euid" -eq 0 ]] || return 1            # not root -> never block
+    [[ "$allow_root" == "true" ]] && return 1   # explicitly allowed via flag/env
+    is_running_in_container && return 1         # containers are allowed by default
+    return 0                                     # otherwise: block
 }
 
 # Platform detection
@@ -1700,6 +1720,7 @@ show_usage() {
     echo "  -n, --dry-run                    Show what would happen without making changes"
     echo "  -r, --restart                    Restart Claude Code after switching"
     echo "  --no-restart                     Skip restart prompt after switching"
+    echo "  --allow-root                     Allow running as root (or set CCSWITCH_ALLOW_ROOT=1)"
     echo "  version                          Show version number"
     echo "  help                             Show this help message"
     echo ""
@@ -1720,12 +1741,6 @@ show_usage() {
 
 # Main script logic
 main() {
-    # Basic checks - allow root execution in containers
-    if [[ $EUID -eq 0 ]] && ! is_running_in_container; then
-        echo "Error: Do not run this script as root (unless running in a container)"
-        exit 1
-    fi
-
     check_dependencies
 
     # Parse global flags first, collect remaining args
@@ -1744,6 +1759,10 @@ main() {
                 RESTART_FLAG="no-restart"
                 shift
                 ;;
+            --allow-root)
+                ALLOW_ROOT=true
+                shift
+                ;;
             *)
                 args+=("$1")
                 shift
@@ -1753,6 +1772,17 @@ main() {
 
     # Restore positional parameters from remaining args
     set -- "${args[@]+"${args[@]}"}"
+
+    # Basic checks - allow root execution in containers or via --allow-root
+    if should_block_root "$EUID" "$ALLOW_ROOT"; then
+        echo "Error: Do not run this script as root."
+        echo "If you understand the risks (e.g. sandbox testing), re-run with --allow-root"
+        echo "or set CCSWITCH_ALLOW_ROOT=1."
+        exit 1
+    fi
+    if [[ $EUID -eq 0 && "$ALLOW_ROOT" == "true" ]] && ! is_running_in_container; then
+        echo "Warning: Running as root (--allow-root). Proceed at your own risk." >&2
+    fi
 
     case "${1:-}" in
         add|--add-account)

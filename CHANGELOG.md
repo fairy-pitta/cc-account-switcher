@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--allow-root` flag and `CCSWITCH_ALLOW_ROOT=1` environment variable to opt out of the root-execution guard for sandbox/testing use ([#13](https://github.com/fairy-pitta/cc-account-switcher/issues/13))
 - **Rate limit auto-switch** — Automatically detect when 5-hour usage exceeds a threshold and switch to the next account via Claude Code's PreToolUse hook system ([#8](https://github.com/fairy-pitta/cc-account-switcher/issues/8))
   - `ccs rate-setup` — Install the PreToolUse hook for automatic switching
   - `ccs rate-setup --threshold N` — Set a custom usage threshold (default: 80%)
