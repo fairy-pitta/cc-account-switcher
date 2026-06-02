@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "description": "A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL",
   "bin": {
-    "ccswitch": "./bin/ccswitch"
+    "ccswitch": "bin/ccswitch"
   },
   "keywords": [
     "claude",
