@@ -1615,12 +1615,24 @@ cmd_rate_setup() {
         updated=$(jq '.rateLimit = {enabled: false}' "$SEQUENCE_FILE" 2>/dev/null)
         write_json "$SEQUENCE_FILE" "$updated"
 
-        # Remove hook from settings.local.json if present (match by hook script path)
+        # Remove hook from settings.local.json if present (match by hook script
+        # path). Handles both the legacy flat shape and the nested-hooks shape,
+        # and drops matcher entries whose nested hooks array becomes empty.
         if [[ -f "$settings_file" ]]; then
             local cleaned
             cleaned=$(jq --arg hook "$hook_script" '
                 if .hooks and .hooks.PreToolUse then
-                    .hooks.PreToolUse = [.hooks.PreToolUse[] | select(.command | contains($hook) | not)]
+                    .hooks.PreToolUse = [
+                        .hooks.PreToolUse[]
+                        # drop legacy flat entries referencing the hook
+                        | select(((.command // "") | contains($hook)) | not)
+                        # strip the hook from nested handler arrays
+                        | (if has("hooks") then
+                               .hooks = (.hooks | map(select((.command // "") | contains($hook) | not)))
+                           else . end)
+                        # drop entries whose nested hooks array is now empty
+                        | select((has("hooks") | not) or ((.hooks | length) > 0))
+                    ]
                 else . end
             ' "$settings_file" 2>/dev/null)
             if [[ -n "$cleaned" ]]; then
@@ -1660,19 +1672,30 @@ cmd_rate_setup() {
     # Build hook command with CCS_PATH so the hook can reliably find ccs
     local hook_command="CCS_PATH=${ccs_bin} ${hook_script}"
 
-    # Check if hook already exists (idempotent) — match by hook script path
+    # Check if hook already exists (idempotent) — match by hook script path.
+    # Detect both the legacy flat shape ({matcher, command}) and the correct
+    # nested shape ({matcher, hooks: [{type, command}]}).
     local hook_exists
     hook_exists=$(jq --arg hook "$hook_script" '
-        .hooks.PreToolUse // [] | map(select(.command | contains($hook))) | length
+        [ .hooks.PreToolUse // [] | .[]
+          | ( (.command // empty), ( .hooks // [] | .[] | .command // empty ) )
+        ] | map(select(contains($hook))) | length
     ' "$settings_file" 2>/dev/null || echo "0")
 
     if [[ "$hook_exists" == "0" ]]; then
+        # Write the Claude Code hook schema: a matcher entry containing a
+        # nested "hooks" array of command handlers. matcher "" matches all tools.
         local with_hook
         with_hook=$(jq --arg hook "$hook_command" '
             .hooks.PreToolUse = (.hooks.PreToolUse // []) + [
                 {
                     "matcher": "",
-                    "command": $hook
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": $hook
+                        }
+                    ]
                 }
             ]
         ' "$settings_file" 2>/dev/null)
