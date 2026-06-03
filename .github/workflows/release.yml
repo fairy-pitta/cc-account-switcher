@@ -9,18 +9,45 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # Fail fast if the in-repo versions don't match the tag, so npm/Homebrew/GitHub
+  # never ship mismatched versions.
+  guard:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify versions match the tag
+        run: |
+          tag_ver="${{ steps.version.outputs.version }}"
+          file_ver=$(grep -E '^readonly VERSION=' ccswitch.sh | sed -E 's/.*"([^"]+)".*/\1/')
+          pkg_ver=$(jq -r '.version' package.json)
+          echo "tag=$tag_ver  ccswitch.sh=$file_ver  package.json=$pkg_ver"
+          fail=0
+          if [ "$file_ver" != "$tag_ver" ]; then
+            echo "::error::ccswitch.sh VERSION ($file_ver) does not match tag ($tag_ver)"
+            fail=1
+          fi
+          if [ "$pkg_ver" != "$tag_ver" ]; then
+            echo "::error::package.json version ($pkg_ver) does not match tag ($tag_ver)"
+            fail=1
+          fi
+          exit $fail
+
+  release:
+    needs: guard
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       - name: Generate SHA256 checksum
         run: |
@@ -29,7 +56,7 @@ jobs:
       - name: Extract changelog for this version
         id: changelog
         run: |
-          version="${{ steps.version.outputs.version }}"
+          version="${{ needs.guard.outputs.version }}"
           # Try to extract section from CHANGELOG.md
           if [ -f CHANGELOG.md ]; then
             changelog=$(awk -v ver="$version" '
@@ -61,3 +88,74 @@ jobs:
             --notes-file release_notes.md \
             ccswitch.sh \
             ccswitch.sh.sha256
+
+  npm-publish:
+    needs: guard
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Skip if NPM_TOKEN is not configured
+        if: ${{ env.NPM_TOKEN == '' }}
+        run: echo "::warning::NPM_TOKEN secret not set — skipping npm publish."
+
+      - name: Setup Node
+        if: ${{ env.NPM_TOKEN != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish to npm (idempotent)
+        if: ${{ env.NPM_TOKEN != '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          name=$(jq -r '.name' package.json)
+          version=$(jq -r '.version' package.json)
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} already published — skipping."
+            exit 0
+          fi
+          npm publish --access public
+
+  homebrew:
+    needs: guard
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Skip if HOMEBREW_TAP_TOKEN is not configured
+        if: ${{ env.TAP_TOKEN == '' }}
+        run: echo "::warning::HOMEBREW_TAP_TOKEN secret not set — skipping Homebrew tap bump."
+
+      - name: Bump tap formula
+        if: ${{ env.TAP_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.guard.outputs.version }}"
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/v${version}.tar.gz"
+
+          echo "Computing SHA256 for $url"
+          sha=$(curl -fsSL "$url" | sha256sum | awk '{print $1}')
+          echo "sha256=$sha"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/fairy-pitta/homebrew-tap.git" tap
+          cd tap
+
+          formula="Formula/ccswitch.rb"
+          sed -i -E "s#archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz#archive/refs/tags/v${version}.tar.gz#" "$formula"
+          sed -i -E "s#sha256 \"[a-f0-9]{64}\"#sha256 \"${sha}\"#" "$formula"
+
+          if git diff --quiet; then
+            echo "Formula already up to date — nothing to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "ccswitch: update to v${version}"
+          git push

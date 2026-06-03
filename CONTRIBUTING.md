@@ -90,6 +90,45 @@ Formula/ccswitch.rb  # Homebrew formula
    - `test: add tests for account removal`
    - `docs: update installation instructions`
 
+## Releasing
+
+Releases are automated. Pushing a `vX.Y.Z` tag fans out to a GitHub Release,
+an npm publish, and a Homebrew tap bump via `.github/workflows/release.yml`.
+
+To cut a release:
+
+1. Bump the version in **both** `ccswitch.sh` (`readonly VERSION="X.Y.Z"`) and
+   `package.json` (`"version": "X.Y.Z"`). They must match the tag — the release
+   workflow's `guard` job fails otherwise.
+2. Move the `CHANGELOG.md` `[Unreleased]` entries into a new
+   `## [X.Y.Z] - YYYY-MM-DD` section (the release notes are extracted from it).
+3. Merge the above to `main`, then tag and push:
+
+   ```bash
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+The workflow then, in parallel:
+
+- **GitHub Release** — creates the release with `ccswitch.sh` + SHA256 and notes
+  from the matching CHANGELOG section.
+- **npm** — publishes `@fairy-pitta/cc-account-switcher` (idempotent; skips if the
+  version already exists).
+- **Homebrew** — updates `url` + `sha256` in `fairy-pitta/homebrew-tap` and commits.
+
+Each step is idempotent, so re-pushing a tag (or re-running the workflow) is safe.
+
+### Required repository secrets
+
+The npm and Homebrew steps are skipped (with a warning) until these are set in
+**Settings → Secrets and variables → Actions**:
+
+- `NPM_TOKEN` — an npm **automation** token with publish rights to the
+  `@fairy-pitta` scope.
+- `HOMEBREW_TAP_TOKEN` — a token (fine-grained PAT) with **contents: write** access
+  to the `fairy-pitta/homebrew-tap` repository.
+
 ## Reporting Issues
 
 When filing a bug report, please include:
