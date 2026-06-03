@@ -151,6 +151,15 @@ ccs rate-setup --disable         # Remove hook and disable
 
 **Cache TTL:** the cache is considered fresh for `DEFAULT_CACHE_TTL` (60s) by default. Override per-install with `.rateLimit.cacheTtl` in `~/.claude-switch-backup/sequence.json`, or per-invocation with `--max-age SECONDS`. A short TTL means fresher data at the cost of more API calls; a longer TTL means fewer calls.
 
+**Optional statusline:** for interactive sessions you can install a statusline that shows the active account and 5-hour usage while keeping the cache warm:
+
+```bash
+ccs statusline-setup             # Install (writes .statusLine into settings.local.json)
+ccs statusline-setup --disable   # Remove it (leaves any other statusline untouched)
+```
+
+It renders e.g. `ccs you@example.com · 5h 42%` and appends `(!)` once you cross the threshold. The cache refresh runs in the background, so it never blocks the prompt. The statusline is **not required** — headless runs refresh the cache on demand (above).
+
 > **Note (multi-account at the same time):** `ccswitch` rewrites a single machine-global credential store, so all Claude Code processes on the machine share one account at a time. Auto-switch is built for the *sequential* case — "when this account is exhausted, rotate to the next." Running different accounts in parallel requires per-process isolation via Claude Code's `CLAUDE_CONFIG_DIR`.
 
 ### Diagnostics

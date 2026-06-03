@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Rate-limit auto-switch now works in headless `claude -p` runs: the PreToolUse hook refreshes the usage cache on demand (TTL-aware) instead of silently no-op'ing when no statusline is keeping it warm ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
 - `ccs rate-check --max-age SECONDS` and a `.rateLimit.cacheTtl` config key to tune how long a cached usage reading is considered fresh (default 60s)
+- `ccs statusline-setup` — optional statusline that shows the active account and 5-hour usage and keeps the usage cache warm for interactive sessions (`statusline/ccs-statusline.sh`) ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
+- npm package now ships the `hooks/` and `statusline/` directories so `ccs rate-setup` / `ccs statusline-setup` work after an npm install
 
 ### Fixed
 

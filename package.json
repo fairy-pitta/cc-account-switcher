@@ -35,6 +35,8 @@
     "bin/ccswitch",
     "completions/",
     "plugins/",
+    "hooks/",
+    "statusline/",
     "README.md",
     "LICENSE"
   ]

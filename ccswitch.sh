@@ -1815,6 +1815,77 @@ cmd_rate_setup() {
     echo "  Settings: $settings_file"
 }
 
+# Install (or remove) the statusline that shows usage and keeps the cache warm.
+# Usage: ccs statusline-setup [--disable]
+cmd_statusline_setup() {
+    local disable=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --disable)
+                disable=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    local settings_file="$HOME/.claude/settings.local.json"
+    local statusline_script
+    statusline_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/statusline/ccs-statusline.sh"
+
+    if [[ "$disable" == true ]]; then
+        # Only remove the statusLine if it's ours (command references our script),
+        # so we never clobber a user's own statusline.
+        if [[ -f "$settings_file" ]]; then
+            local cleaned
+            cleaned=$(jq --arg s "$statusline_script" '
+                if (.statusLine.command // "") | contains($s)
+                then del(.statusLine) else . end
+            ' "$settings_file" 2>/dev/null)
+            if [[ -n "$cleaned" ]]; then
+                echo "$cleaned" | jq . > "$settings_file"
+            fi
+        fi
+        echo "ccs statusline disabled."
+        echo "Settings: $settings_file"
+        return
+    fi
+
+    if [[ ! -f "$statusline_script" ]]; then
+        echo "Warning: statusline script not found at $statusline_script"
+        echo "Make sure you have the statusline/ccs-statusline.sh file installed."
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$settings_file")"
+    [[ -f "$settings_file" ]] || echo '{}' > "$settings_file"
+
+    # Resolve absolute path to this script (ccs) so the statusline can find it.
+    local ccs_bin
+    ccs_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    local sl_command="CCS_PATH=${ccs_bin} ${statusline_script}"
+
+    # Warn (but proceed) if a different statusline is already configured.
+    local existing
+    existing=$(jq -r '.statusLine.command // empty' "$settings_file" 2>/dev/null || true)
+    if [[ -n "$existing" && "$existing" != *"$statusline_script"* ]]; then
+        echo "Note: replacing an existing statusLine command:"
+        echo "  was: $existing"
+    fi
+
+    local with_sl
+    with_sl=$(jq --arg cmd "$sl_command" '
+        .statusLine = {"type": "command", "command": $cmd}
+    ' "$settings_file" 2>/dev/null)
+    echo "$with_sl" | jq . > "$settings_file"
+
+    echo "ccs statusline enabled."
+    echo "  Statusline script: $statusline_script"
+    echo "  Settings: $settings_file"
+}
+
 # Show usage
 show_usage() {
     echo "Multi-Account Switcher for Claude Code v${VERSION}"
@@ -1840,6 +1911,8 @@ show_usage() {
     echo "  rate-check [--threshold N]       Check if usage exceeds threshold"
     echo "  rate-setup [--threshold N]       Install PreToolUse hook for auto-switch"
     echo "  rate-setup --disable             Remove hook and disable auto-switch"
+    echo "  statusline-setup                 Install statusline (shows usage, keeps cache warm)"
+    echo "  statusline-setup --disable       Remove the ccs statusline"
     echo ""
     echo "Diagnostics:"
     echo "  check                            Verify backup integrity (JSON, permissions, keychain)"
@@ -1950,6 +2023,10 @@ main() {
         rate-setup)
             shift
             cmd_rate_setup "$@"
+            ;;
+        statusline-setup)
+            shift
+            cmd_statusline_setup "$@"
             ;;
         check|--check)
             cmd_check
