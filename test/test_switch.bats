@@ -87,9 +87,11 @@ teardown() {
     add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
     create_fake_credentials "user1@example.com"
 
+    # With one account, rotation wraps to self — perform_switch's no-op guard
+    # short-circuits instead of redundantly rewriting the credential store.
     run run_ccswitch --switch
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Switched to Account-1 (user1@example.com)"* ]]
+    [[ "$output" == *"Already on Account-1 (user1@example.com)"* ]]
 }
 
 @test "test_switch_with_unmanaged_active_account_auto_adds_it" {

@@ -59,6 +59,13 @@ EOF
     # Ensure no cache file exists
     rm -f /tmp/claude-usage-cache.json
 
+    # Offline: a failing fetch with no cache to fall back to → error exit 2.
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+exit 1
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+
     run run_ccswitch rate-check
     [ "$status" -eq 2 ]
 }
@@ -185,6 +192,97 @@ MOCK_EOF
     run run_ccswitch rate-check --threshold 80
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
+}
+
+# Write a cache at the real path with a custom age (seconds ago) and account.
+create_aged_cache() {
+    local age="${1:-0}"
+    local utilization="${2:-50}"
+    local email="${3:-user1@example.com}"
+    local ts=$(( $(date +%s) - age ))
+    cat > /tmp/claude-usage-cache.json <<EOF
+{
+  "five_hour": { "utilization": $utilization, "limit": 100, "used": $utilization },
+  "active_account": "$email",
+  "cached_at": $ts
+}
+EOF
+}
+
+@test "test_rate_check_stale_cache_triggers_refresh" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+
+    # Cache is 5 minutes old (older than the 60s default TTL) and shows high usage.
+    create_aged_cache 300 95 "user1@example.com"
+
+    # A refresh returns low usage — the stale value must be replaced by this.
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+echo '{"five_hour":{"utilization":20,"limit":100,"used":20}}'
+echo "200"
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+
+    run run_ccswitch rate-check --threshold 80
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "test_rate_check_fresh_cache_within_max_age_does_not_fetch" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+
+    # Cache is 30s old, under threshold.
+    create_aged_cache 30 50 "user1@example.com"
+
+    # curl would FAIL if called — proves no fetch happens when cache is fresh.
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+exit 1
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+
+    run run_ccswitch rate-check --threshold 80 --max-age 60
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "test_rate_check_max_age_zero_forces_refresh" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+
+    # Fresh cache showing high usage, but --max-age 0 makes everything stale.
+    create_aged_cache 1 95 "user1@example.com"
+
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10,"limit":100,"used":10}}'
+echo "200"
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+
+    run run_ccswitch rate-check --threshold 80 --max-age 0
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "test_rate_check_refresh_failure_falls_back_to_stale_cache" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+
+    # Stale cache, under threshold. Refresh fails — we should fall back to it.
+    create_aged_cache 300 40 "user1@example.com"
+
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+exit 1
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+
+    run run_ccswitch rate-check --threshold 80
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"using cached data"* ]]
 }
 
 @test "test_rate_check_perform_switch_failure_fails_open" {

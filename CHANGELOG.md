@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Rate-limit auto-switch now works in headless `claude -p` runs: the PreToolUse hook refreshes the usage cache on demand (TTL-aware) instead of silently no-op'ing when no statusline is keeping it warm ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
+- `ccs rate-check --max-age SECONDS` and a `.rateLimit.cacheTtl` config key to tune how long a cached usage reading is considered fresh (default 60s)
+
+### Fixed
+
+- Concurrent account switches are now serialized with an exclusive lock (`mkdir`-based, portable to macOS which lacks `flock`), so orchestrator heartbeats crossing the threshold at once can no longer race or thrash accounts ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
+- Switching to the already-active account is now a fast no-op instead of redundantly rewriting the credential store
+
 ## [0.3.1] - 2026-06-03
 
 ### Fixed

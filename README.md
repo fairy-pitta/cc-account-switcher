@@ -134,6 +134,7 @@ ccs rate-setup --threshold 70    # Custom threshold
 # Manual check
 ccs rate-check                   # Check current usage vs threshold
 ccs rate-check --auto-switch     # Check and switch if exceeded
+ccs rate-check --max-age 30      # Treat the cache as stale after 30s
 
 # Disable
 ccs rate-setup --disable         # Remove hook and disable
@@ -141,12 +142,16 @@ ccs rate-setup --disable         # Remove hook and disable
 
 **How it works:**
 
-1. Your statusline script calls the Anthropic Usage API and caches data to `/tmp/claude-usage-cache.json`
-2. Before each tool call, the PreToolUse hook reads the cache (~20ms, no API calls)
-3. If usage exceeds the threshold, it switches to the next account and tells Claude Code to deny the tool call with a "please restart" message
-4. All errors fail open — a broken hook never blocks your work
+1. The usage cache lives at `/tmp/claude-usage-cache.json` with a `cached_at` timestamp.
+2. Before each tool call the PreToolUse hook checks the cache. If it's fresh (younger than the TTL) and under threshold, it returns immediately (~20ms, no API call).
+3. If the cache is missing, stale, or for a different account, the hook refreshes it from the [Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage) on demand — so it works in headless `claude -p` runs with no statusline.
+4. If usage exceeds the threshold, it switches to the next account and tells Claude Code to deny the tool call with a "please restart" message.
+5. Switches take an exclusive lock, so concurrent agents (e.g. an orchestrator's heartbeats) can't race or thrash accounts.
+6. All errors fail open — a broken hook never blocks your work.
 
-**Prerequisites:** A statusline script that keeps `/tmp/claude-usage-cache.json` warm with data from the [Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage). The cache should contain `five_hour.utilization` (0-100).
+**Cache TTL:** the cache is considered fresh for `DEFAULT_CACHE_TTL` (60s) by default. Override per-install with `.rateLimit.cacheTtl` in `~/.claude-switch-backup/sequence.json`, or per-invocation with `--max-age SECONDS`. A short TTL means fresher data at the cost of more API calls; a longer TTL means fewer calls.
+
+> **Note (multi-account at the same time):** `ccswitch` rewrites a single machine-global credential store, so all Claude Code processes on the machine share one account at a time. Auto-switch is built for the *sequential* case — "when this account is exhausted, rotate to the next." Running different accounts in parallel requires per-process isolation via Claude Code's `CLAUDE_CONFIG_DIR`.
 
 ### Diagnostics
 

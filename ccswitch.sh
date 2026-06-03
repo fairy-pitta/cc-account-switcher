@@ -12,6 +12,13 @@ readonly VERSION="0.3.1"
 readonly BACKUP_DIR="$HOME/.claude-switch-backup"
 readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
 readonly DIR_ACCOUNTS_FILE="$BACKUP_DIR/dir-accounts.json"
+# Directory used as an exclusive lock for credential switches. mkdir is atomic on
+# every POSIX filesystem (macOS has no flock), so it serializes concurrent switches.
+readonly LOCK_DIR="$BACKUP_DIR/.switch.lock"
+# How long a cached usage reading stays "fresh" (seconds). Past this the rate-limit
+# check re-fetches from the usage API so headless (`claude -p`) runs aren't stale.
+# Override per-install with .rateLimit.cacheTtl in sequence.json.
+readonly DEFAULT_CACHE_TTL=60
 
 # Global flags (set during argument parsing)
 DRY_RUN=false
@@ -171,6 +178,64 @@ setup_directories() {
     mkdir -p "$BACKUP_DIR"/{configs,credentials}
     chmod 700 "$BACKUP_DIR"
     chmod 700 "$BACKUP_DIR"/{configs,credentials}
+}
+
+# Acquire an exclusive lock around a credential switch so concurrent agents
+# (e.g. orchestrator heartbeats crossing the threshold at once) can't race the
+# non-atomic read-modify-write of the credential store + sequence.json.
+# mkdir is atomic everywhere; macOS lacks flock. Steals a lock whose owner PID
+# is gone. Returns 0 on success, 1 on timeout.
+acquire_switch_lock() {
+    local timeout_s="${1:-10}"
+    local max_iters=$(( timeout_s * 5 ))   # 0.2s per iteration
+    local i=0
+    mkdir -p "$BACKUP_DIR" 2>/dev/null || true
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        # Stale-lock recovery: if the recorded owner is dead, reclaim the lock.
+        local owner=""
+        owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+        if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -rf "$LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+        i=$(( i + 1 ))
+        if [[ "$i" -ge "$max_iters" ]]; then
+            return 1
+        fi
+        sleep 0.2
+    done
+    echo "$$" > "$LOCK_DIR/pid" 2>/dev/null || true
+    return 0
+}
+
+# Release the switch lock. Idempotent (safe to call when not held).
+release_switch_lock() {
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+}
+
+# Is the usage cache missing, account-mismatched, or older than the TTL?
+# Echoes "stale" or "fresh". Used by both rate-check and the statusline.
+cache_freshness() {
+    local cache_file="$1"
+    local ttl="$2"
+    local expected_account="${3:-}"
+    [[ -f "$cache_file" ]] || { echo "stale"; return; }
+    local cached_at now age
+    cached_at=$(jq -r '.cached_at // 0' "$cache_file" 2>/dev/null || echo 0)
+    [[ "$cached_at" =~ ^[0-9]+$ ]] || cached_at=0
+    now=$(date +%s)
+    age=$(( now - cached_at ))
+    if [[ "$cached_at" -le 0 || "$age" -ge "$ttl" ]]; then
+        echo "stale"; return
+    fi
+    if [[ -n "$expected_account" ]]; then
+        local cached_account
+        cached_account=$(jq -r '.active_account // empty' "$cache_file" 2>/dev/null || true)
+        if [[ -n "$cached_account" && "$cached_account" != "$expected_account" ]]; then
+            echo "stale"; return
+        fi
+    fi
+    echo "fresh"
 }
 
 # Claude Code process detection (Node.js app)
@@ -1137,6 +1202,29 @@ perform_switch() {
         return
     fi
 
+    # Serialize the switch: take the lock, then RE-READ the authoritative active
+    # account under it (another switch may have landed since the reads above).
+    if ! acquire_switch_lock; then
+        if [[ "${CCS_SILENT:-}" != "1" ]]; then
+            echo "Error: another account switch is in progress (could not acquire lock)."
+        else
+            echo "Error: switch lock busy; skipping." >&2
+        fi
+        exit 1
+    fi
+    current_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    current_email=$(get_current_account)
+
+    # No-op guard: if we're already on the target (e.g. a concurrent switch beat
+    # us to it), release and return without thrashing the credential store.
+    if [[ "$current_account" == "$target_account" ]]; then
+        release_switch_lock
+        if [[ "${CCS_SILENT:-}" != "1" ]]; then
+            echo "Already on Account-$target_account ($target_email)."
+        fi
+        return
+    fi
+
     # Save pre-switch state for rollback
     local rollback_creds rollback_config rollback_sequence
     rollback_creds=$(read_credentials)
@@ -1154,6 +1242,7 @@ perform_switch() {
         write_credentials "$rollback_creds" 2>/dev/null || true
         write_json "$(get_claude_config_path)" "$rollback_config" 2>/dev/null || true
         write_json "$SEQUENCE_FILE" "$rollback_sequence" 2>/dev/null || true
+        release_switch_lock
         if [[ "${CCS_SILENT:-}" != "1" ]]; then
             echo "Rollback complete. Account-$current_account ($current_email) is still active."
         else
@@ -1260,6 +1349,10 @@ perform_switch() {
         rollback
         exit 1
     fi
+
+    # Switch is committed; release the lock before any interactive display/restart
+    # so we never hold it while waiting on the user.
+    release_switch_lock
 
     if [[ "${CCS_SILENT:-}" != "1" ]]; then
         echo "Switched to Account-$target_account ($target_email)"
@@ -1374,13 +1467,14 @@ fetch_usage_data() {
 }
 
 # Rate limit check command
-# Usage: ccs rate-check [--threshold N] [--auto-switch] [--hook-mode] [--refresh]
+# Usage: ccs rate-check [--threshold N] [--auto-switch] [--hook-mode] [--refresh] [--max-age SECONDS]
 # Exit codes: 0=ok, 1=exceeded (switched if --auto-switch), 2=error, 3=all accounts limited
 cmd_rate_check() {
     local threshold=""
     local auto_switch=false
     local hook_mode=false
     local refresh=false
+    local max_age=""
     local cache_file="/tmp/claude-usage-cache.json"
 
     # Parse flags
@@ -1402,6 +1496,10 @@ cmd_rate_check() {
                 refresh=true
                 shift
                 ;;
+            --max-age)
+                max_age="$2"
+                shift 2
+                ;;
             *)
                 shift
                 ;;
@@ -1421,42 +1519,51 @@ cmd_rate_check() {
         threshold="${threshold:-80}"
     fi
 
-    # Force refresh if requested
+    # Resolve cache TTL: --max-age flag > .rateLimit.cacheTtl config > default
+    if [[ -z "$max_age" ]]; then
+        if [[ -f "$SEQUENCE_FILE" ]]; then
+            local cfg_ttl
+            cfg_ttl=$(jq -r '.rateLimit.cacheTtl // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+            [[ -n "$cfg_ttl" ]] && max_age="$cfg_ttl"
+        fi
+        max_age="${max_age:-$DEFAULT_CACHE_TTL}"
+    fi
+
+    local current_email
+    current_email=$(get_current_account)
+
+    # Decide whether we need fresh data: forced, or the cache is missing / stale /
+    # for a different account than the one currently active. This is what makes the
+    # headless (`claude -p`, no statusline) path work — the cache is refreshed on
+    # demand instead of silently no-oping on a missing/stale file.
+    local need_fetch=false
     if [[ "$refresh" == true ]]; then
-        fetch_usage_data || {
+        need_fetch=true
+    elif [[ "$(cache_freshness "$cache_file" "$max_age" "$current_email")" == "stale" ]]; then
+        need_fetch=true
+    fi
+
+    if [[ "$need_fetch" == true ]]; then
+        if ! fetch_usage_data; then
             if [[ "$hook_mode" == true ]]; then
                 exit 0  # Fail open
             fi
-            echo "Error: Failed to fetch usage data" >&2
-            exit 2
-        }
+            # If a usable (if stale) cache exists, fall back to it rather than error.
+            if [[ ! -f "$cache_file" ]]; then
+                echo "Error: Failed to fetch usage data and no cache available" >&2
+                exit 2
+            fi
+            echo "Warning: usage refresh failed; using cached data" >&2
+        fi
     fi
 
-    # Check cache exists
+    # Cache must exist past this point
     if [[ ! -f "$cache_file" ]]; then
         if [[ "$hook_mode" == true ]]; then
             exit 0  # Fail open
         fi
         echo "Error: No usage cache found at $cache_file" >&2
         exit 2
-    fi
-
-    # Validate active_account matches current account
-    local current_email cached_account
-    current_email=$(get_current_account)
-    cached_account=$(jq -r '.active_account // empty' "$cache_file" 2>/dev/null || true)
-
-    if [[ -n "$cached_account" && "$cached_account" != "$current_email" ]]; then
-        # Cache is stale (different account), try to refresh
-        if fetch_usage_data; then
-            : # Cache refreshed successfully
-        else
-            if [[ "$hook_mode" == true ]]; then
-                exit 0  # Fail open
-            fi
-            echo "Error: Cache account mismatch and refresh failed" >&2
-            exit 2
-        fi
     fi
 
     # Read utilization
