@@ -1204,7 +1204,7 @@ perform_switch() {
 
     # Serialize the switch: take the lock, then RE-READ the authoritative active
     # account under it (another switch may have landed since the reads above).
-    if ! acquire_switch_lock; then
+    if ! acquire_switch_lock 10; then
         if [[ "${CCS_SILENT:-}" != "1" ]]; then
             echo "Error: another account switch is in progress (could not acquire lock)."
         else
