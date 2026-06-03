@@ -12,6 +12,8 @@ readonly VERSION="0.3.1"
 readonly BACKUP_DIR="$HOME/.claude-switch-backup"
 readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
 readonly DIR_ACCOUNTS_FILE="$BACKUP_DIR/dir-accounts.json"
+# Parent dir for per-account isolated CLAUDE_CONFIG_DIR sandboxes (see `ccs exec`).
+readonly ISOLATED_DIR="$BACKUP_DIR/isolated"
 # Directory used as an exclusive lock for credential switches. mkdir is atomic on
 # every POSIX filesystem (macOS has no flock), so it serializes concurrent switches.
 readonly LOCK_DIR="$BACKUP_DIR/.switch.lock"
@@ -1365,6 +1367,175 @@ perform_switch() {
     fi
 }
 
+# --- Per-agent isolation (CLAUDE_CONFIG_DIR) ----------------------------------
+#
+# Unlike a switch (which rewrites the single machine-global credential store),
+# these materialize an account into its OWN config dir so multiple Claude Code
+# processes can run as DIFFERENT accounts at the same time — the parallel
+# multi-account case orchestrators need. No global mutation, so no lock needed.
+
+# Materialize <account_num> into <dest> as .claude.json + .credentials.json.
+# For the currently-active account we snapshot the LIVE global store (freshest,
+# may hold refreshed tokens); for others we use the per-account backup.
+# Returns 0 on success, 1 on failure.
+materialize_config_dir() {
+    local account_num="$1"
+    local dest="$2"
+
+    local email
+    email=$(jq -r --arg n "$account_num" '.accounts[$n].email // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    if [[ -z "$email" ]]; then
+        echo "Error: Account-$account_num not found" >&2
+        return 1
+    fi
+
+    local active cfg creds
+    active=$(jq -r '.activeAccountNumber // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    if [[ "$account_num" == "$active" ]]; then
+        # Live, freshest copy from the global store.
+        cfg=$(cat "$(get_claude_config_path)" 2>/dev/null || true)
+        creds=$(read_credentials)
+    else
+        cfg=$(read_account_config "$account_num" "$email")
+        creds=$(read_account_credentials "$account_num" "$email")
+    fi
+
+    if [[ -z "$cfg" || -z "$creds" ]]; then
+        echo "Error: missing stored data for Account-$account_num ($email)" >&2
+        return 1
+    fi
+
+    mkdir -p "$dest" || { echo "Error: cannot create $dest" >&2; return 1; }
+    chmod 700 "$dest" 2>/dev/null || true
+
+    # Write the config; Claude Code reads $CLAUDE_CONFIG_DIR/.claude.json.
+    if ! printf '%s' "$cfg" | jq . > "$dest/.claude.json" 2>/dev/null; then
+        echo "Error: stored config for Account-$account_num is not valid JSON" >&2
+        return 1
+    fi
+    chmod 600 "$dest/.claude.json" 2>/dev/null || true
+
+    # Write credentials as a file. On Linux/WSL this is where Claude Code reads
+    # them. On macOS credentials normally live in the Keychain — see the warning
+    # emitted by the callers; whether CLAUDE_CONFIG_DIR redirects creds to this
+    # file on macOS needs live verification.
+    if ! printf '%s' "$creds" | jq . > "$dest/.credentials.json" 2>/dev/null; then
+        echo "Error: stored credentials for Account-$account_num are not valid JSON" >&2
+        return 1
+    fi
+    chmod 600 "$dest/.credentials.json" 2>/dev/null || true
+
+    return 0
+}
+
+# Print a one-time warning on macOS about the Keychain caveat.
+_isolation_macos_warning() {
+    if [[ "$(detect_platform)" == "macos" ]]; then
+        echo "Warning: on macOS, Claude Code stores credentials in the Keychain." >&2
+        echo "         CLAUDE_CONFIG_DIR isolation is verified on Linux/WSL; on macOS the" >&2
+        echo "         per-agent credential file may be ignored in favor of the shared" >&2
+        echo "         Keychain, in which case isolated agents share one account." >&2
+    fi
+}
+
+# ccs config-dir <account> [path]
+# Materialize an account's config dir and print it (plus an export line) so an
+# orchestrator can pin a process to that account itself.
+cmd_config_dir() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: ccs config-dir <account_number|email|profile> [path]"
+        exit 1
+    fi
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"
+        exit 1
+    fi
+
+    local identifier="$1"
+    local dest="${2:-}"
+    local account_num
+    account_num=$(resolve_account_identifier "$identifier")
+    if [[ -z "$account_num" ]]; then
+        echo "Error: Account '$identifier' not found"
+        exit 1
+    fi
+
+    local email
+    email=$(jq -r --arg n "$account_num" '.accounts[$n].email' "$SEQUENCE_FILE")
+    [[ -z "$dest" ]] && dest="$ISOLATED_DIR/${account_num}-${email}"
+
+    setup_directories
+    if ! materialize_config_dir "$account_num" "$dest"; then
+        exit 1
+    fi
+
+    _isolation_macos_warning
+    echo "$dest"
+    echo "export CLAUDE_CONFIG_DIR=\"$dest\""
+}
+
+# ccs exec <account> [--dir PATH] -- <command...>
+# Run <command> with CLAUDE_CONFIG_DIR pointed at the account's isolated dir.
+# Note: put any ccs global options (e.g. --dry-run) BEFORE `exec`; everything
+# after `--` is passed to the command verbatim.
+cmd_exec() {
+    if [[ $# -lt 1 ]]; then
+        echo "Usage: ccs exec <account_number|email|profile> [--dir PATH] -- <command> [args...]"
+        exit 1
+    fi
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet"
+        exit 1
+    fi
+
+    local identifier="$1"; shift
+    local dest=""
+    local -a cmd=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dir)
+                dest="$2"; shift 2
+                ;;
+            --)
+                shift
+                cmd=("$@")
+                break
+                ;;
+            *)
+                # Allow `ccs exec <acct> <command...>` without an explicit `--`.
+                cmd=("$@")
+                break
+                ;;
+        esac
+    done
+
+    if [[ ${#cmd[@]} -eq 0 ]]; then
+        echo "Error: no command given. Usage: ccs exec <account> -- <command> [args...]"
+        exit 1
+    fi
+
+    local account_num
+    account_num=$(resolve_account_identifier "$identifier")
+    if [[ -z "$account_num" ]]; then
+        echo "Error: Account '$identifier' not found"
+        exit 1
+    fi
+
+    local email
+    email=$(jq -r --arg n "$account_num" '.accounts[$n].email' "$SEQUENCE_FILE")
+    [[ -z "$dest" ]] && dest="$ISOLATED_DIR/${account_num}-${email}"
+
+    setup_directories
+    if ! materialize_config_dir "$account_num" "$dest"; then
+        exit 1
+    fi
+
+    _isolation_macos_warning
+    # Replace this process with the command, scoped to the isolated config dir.
+    CLAUDE_CONFIG_DIR="$dest" exec "${cmd[@]}"
+}
+
 # Fetch usage data from Anthropic OAuth Usage API
 # Writes to /tmp/claude-usage-cache.json with active_account field
 # Returns 0 on success, 1 on failure
@@ -1907,6 +2078,10 @@ show_usage() {
     echo "  dir [dir] <num|email|profile>    Associate a directory with an account"
     echo "  auto                             Switch based on current directory mapping"
     echo ""
+    echo "Parallel / isolated accounts (CLAUDE_CONFIG_DIR):"
+    echo "  exec <num|email> -- <command>    Run a command as an account, isolated"
+    echo "  config-dir <num|email> [path]    Materialize an account's config dir, print it"
+    echo ""
     echo "Rate Limiting:"
     echo "  rate-check [--threshold N]       Check if usage exceeds threshold"
     echo "  rate-setup [--threshold N]       Install PreToolUse hook for auto-switch"
@@ -1939,6 +2114,7 @@ show_usage() {
     echo "  ccs profile 1 work                         # Name account 1 'work'"
     echo "  ccs dir ~/work 1                           # Map ~/work to account 1"
     echo "  ccs auto                                   # Switch based on current directory"
+    echo "  ccs exec 2 -- claude -p \"hi\"               # Run claude as account 2, isolated"
     echo "  ccs rm user@example.com                    # Remove account"
 }
 
@@ -1965,6 +2141,13 @@ main() {
             --allow-root)
                 ALLOW_ROOT=true
                 shift
+                ;;
+            exec)
+                # `exec` runs an arbitrary command — stop interpreting global
+                # flags so anything after it (e.g. --no-restart for claude) is
+                # passed through verbatim. Put ccs options before `exec`.
+                args+=("$@")
+                break
                 ;;
             *)
                 args+=("$1")
@@ -2015,6 +2198,14 @@ main() {
             ;;
         auto|--auto-switch)
             cmd_auto_switch
+            ;;
+        exec)
+            shift
+            cmd_exec "$@"
+            ;;
+        config-dir)
+            shift
+            cmd_config_dir "$@"
             ;;
         rate-check)
             shift
