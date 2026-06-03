@@ -1,6 +1,6 @@
 {
   "name": "@fairy-pitta/cc-account-switcher",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A simple tool to manage and switch between multiple Claude Code accounts on macOS, Linux, and WSL",
   "bin": {
     "ccswitch": "bin/ccswitch"

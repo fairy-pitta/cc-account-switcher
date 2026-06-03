@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-03
+
+### Fixed
+
+- Rate-limit auto-switch hook was installed with a non-conforming settings schema and never fired; `ccs rate-setup` now writes Claude Code's nested hook schema, and `--disable` cleans up both the new and legacy shapes ([#21](https://github.com/fairy-pitta/cc-account-switcher/pull/21))
+
+### Changed
+
+- npm package is now published under the scoped name `@fairy-pitta/cc-account-switcher` ([#16](https://github.com/fairy-pitta/cc-account-switcher/pull/16))
+
+### Added
+
+- Automated release pipeline — pushing a `vX.Y.Z` tag now fans out to a GitHub Release, npm publish, and a Homebrew tap bump, gated by a version-consistency check ([#19](https://github.com/fairy-pitta/cc-account-switcher/issues/19))
+
 ## [0.3.0] - 2026-06-02
 
 ### Added
@@ -53,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS Keychain integration
 - Linux credential file support
 
-[Unreleased]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fairy-pitta/cc-account-switcher/releases/tag/v0.1.0
