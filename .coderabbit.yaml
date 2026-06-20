@@ -50,6 +50,9 @@ reviews:
     - "!**/*.gif"
     - "!**/*.png"
     - "!**/*.jpg"
+    - "!**/*.jpeg"
+    - "!**/*.webp"
+    - "!**/*.svg"
 
   path_instructions:
     - path: "**"
@@ -67,9 +70,12 @@ reviews:
       instructions: >-
         POSIX-leaning Bash without Bash 4+ features (associative arrays, ${var,,}, etc.)
         for macOS /bin/bash 3.2 compatibility. Flag unquoted expansions, missing
-        `set -euo pipefail` guards, non-atomic read-modify-write of credential/state
-        files (race conditions; prefer flock + temp-file-then-rename), and any
-        handling of secrets that risks logging, echoing, or leaking them.
+        `set -euo pipefail` guards, and non-atomic read-modify-write of
+        credential/state files (race conditions). Prefer the portable
+        temp-file-then-rename pattern as the primary atomicity mechanism; treat
+        `flock` only as an optional guard where available (note: `flock` is
+        absent on stock macOS, so it must not be the sole mechanism). Also flag
+        any handling of secrets that risks logging, echoing, or leaking them.
     - path: "test/**/*.bats"
       instructions: >-
         Bats tests. Check that new behavior is covered and that tests stay isolated
