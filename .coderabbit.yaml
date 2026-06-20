@@ -26,6 +26,17 @@ reviews:
     - "!**/*.jpg"
 
   path_instructions:
+    - path: "**"
+      instructions: >-
+        Cross-platform compatibility is mandatory: whatever the change is,
+        confirm it works on BOTH macOS and Windows. This is a Bash tool, so
+        "Windows" means WSL / Git Bash — flag anything that assumes one OS only,
+        e.g. macOS Keychain vs a Windows/WSL file-based credential store,
+        hardcoded `/tmp` or `/Users/...` paths, `flock` and other tools that may
+        be missing on macOS or Windows, BSD-vs-GNU flag differences
+        (`sed`, `stat`, `date`, `mktemp`), and CRLF/line-ending assumptions.
+        Note: CI only runs ubuntu + macos, so Windows/WSL regressions will not
+        be caught by CI — call them out explicitly.
     - path: "**/*.sh"
       instructions: >-
         POSIX-leaning Bash without Bash 4+ features (associative arrays, ${var,,}, etc.)
