@@ -1448,10 +1448,11 @@ materialize_config_dir() {
     # dir reads as logged-out). read_credentials decodes the hex form `security -w`
     # returns so this stays valid JSON.
     #
-    # CAVEAT (macOS, #29): on Claude Code 2.1.x the credential read from the Keychain is
-    # a stale/expired access token (the live app refreshes in-memory and keeps live creds
-    # under Claude Code-credentials-<hash>), so the file written here can be expired and a
-    # real `claude -p` in the isolated dir fails with 401. Reliable on Linux/WSL only.
+    # CAVEAT (macOS, #29): per-agent isolation by COPYING credentials does not work on
+    # Claude Code 2.1.x. Claude binds the OAuth token to the live session, so a duplicated
+    # token — file here OR the per-dir `Claude Code-credentials-<hash>` Keychain item —
+    # is rejected with 401 in an isolated CLAUDE_CONFIG_DIR even when fresh. Reliable on
+    # Linux/WSL only; on macOS the only path is `claude auth login` per dir.
     if ! printf '%s' "$creds" | jq . > "$dest/.credentials.json" 2>/dev/null; then
         echo "Error: stored credentials for Account-$account_num are not valid JSON" >&2
         return 1
@@ -1461,14 +1462,14 @@ materialize_config_dir() {
     return 0
 }
 
-# Warn on macOS: isolation is reliable on Linux/WSL, but on Claude Code 2.1.x the
-# materialized Keychain credential can be stale/expired, so a real `claude -p` in
-# the isolated dir may fail with 401. See #29.
+# Warn on macOS: copying credentials does NOT achieve isolation on Claude Code 2.1.x —
+# the OAuth token is session-bound, so a duplicated token is rejected (401) in an isolated
+# dir. Reliable on Linux/WSL; on macOS use `claude auth login` per dir. See #29.
 _isolation_macos_note() {
     if [[ "$(detect_platform)" == "macos" ]]; then
-        echo "Warning: on macOS, the materialized credential may be stale on current" >&2
-        echo "         Claude Code, so real calls in the isolated dir can fail with 401." >&2
-        echo "         Isolation is reliable on Linux/WSL. See issue #29." >&2
+        echo "Warning: on macOS, copying credentials does NOT isolate accounts on current" >&2
+        echo "         Claude Code — a duplicated token is rejected (401) in the isolated dir." >&2
+        echo "         Reliable on Linux/WSL. For macOS, run 'claude auth login' per dir. See #29." >&2
     fi
 }
 
