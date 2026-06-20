@@ -152,3 +152,19 @@ teardown() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"not found"* ]]
 }
+
+# --- macOS isolation warning (the #29 caveat) ---------------------------------
+# The default test env mocks uname as "Darwin", so detect_platform => macos.
+
+@test "config-dir prints the macOS credential-copy warning on Darwin" {
+    run run_ccswitch config-dir 2
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"copying credentials does NOT isolate"* ]]
+    [[ "$output" == *"#29"* ]]
+}
+
+@test "exec prints the macOS credential-copy warning on Darwin" {
+    run run_ccswitch exec 2 --dir "$TEST_HOME/iso-warn" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"copying credentials does NOT isolate"* ]]
+}
