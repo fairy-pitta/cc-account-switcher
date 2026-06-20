@@ -12,10 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rate-limit auto-switch now works in headless `claude -p` runs: the PreToolUse hook refreshes the usage cache on demand (TTL-aware) instead of silently no-op'ing when no statusline is keeping it warm ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
 - `ccs rate-check --max-age SECONDS` and a `.rateLimit.cacheTtl` config key to tune how long a cached usage reading is considered fresh (default 60s)
 - `ccs statusline-setup` — optional statusline that shows the active account and 5-hour usage and keeps the usage cache warm for interactive sessions (`statusline/ccs-statusline.sh`) ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
+- `ccs exec <account> -- <command>` and `ccs config-dir <account>` — run commands as a specific account isolated in their own `CLAUDE_CONFIG_DIR`, so multiple Claude Code processes can run as different accounts in parallel without touching the global credential store ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20)). Works on Linux/WSL (file-based credentials). On macOS this does **not** work on Claude Code 2.1.x — the OAuth token is session-bound, so a copied token is rejected with `401` in an isolated dir; use `claude auth login` per dir there ([#29](https://github.com/fairy-pitta/cc-account-switcher/issues/29)). The sequential rate-limit auto-switch is unaffected and works on macOS.
 - npm package now ships the `hooks/` and `statusline/` directories so `ccs rate-setup` / `ccs statusline-setup` work after an npm install
 
 ### Fixed
 
+- macOS Keychain credentials are now decoded correctly. Newer Claude Code stores the credential as binary data, so `security -w` returns a hex dump (`7b22…`) rather than JSON; this broke `ccs exec`/`config-dir` (empty, unauthenticated isolated dirs) and could corrupt credentials on a multi-account switch. `read_credentials` now decodes the hex form back to JSON ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
 - Concurrent account switches are now serialized with an exclusive lock (`mkdir`-based, portable to macOS which lacks `flock`), so orchestrator heartbeats crossing the threshold at once can no longer race or thrash accounts ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
 - Switching to the already-active account is now a fast no-op instead of redundantly rewriting the credential store
 

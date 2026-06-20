@@ -160,7 +160,24 @@ ccs statusline-setup --disable   # Remove it (leaves any other statusline untouc
 
 It renders e.g. `ccs you@example.com · 5h 42%` and appends `(!)` once you cross the threshold. The cache refresh runs in the background, so it never blocks the prompt. The statusline is **not required** — headless runs refresh the cache on demand (above).
 
-> **Note (multi-account at the same time):** `ccswitch` rewrites a single machine-global credential store, so all Claude Code processes on the machine share one account at a time. Auto-switch is built for the *sequential* case — "when this account is exhausted, rotate to the next." Running different accounts in parallel requires per-process isolation via Claude Code's `CLAUDE_CONFIG_DIR`.
+> **Note (multi-account at the same time):** `ccswitch` rewrites a single machine-global credential store, so all Claude Code processes on the machine share one account at a time. Auto-switch is built for the *sequential* case — "when this account is exhausted, rotate to the next." Running different accounts in parallel requires per-process isolation via `CLAUDE_CONFIG_DIR` — see below.
+
+### Parallel / isolated accounts (`CLAUDE_CONFIG_DIR`)
+
+To run multiple Claude Code processes as **different** accounts at the same time (e.g. an orchestrator like Paperclip/Multica fanning out agents), give each process its own config directory instead of switching the global store:
+
+```bash
+# Run a command as a specific account, isolated in its own config dir
+ccs exec 2 -- claude -p "summarize this repo"
+ccs exec work -- claude            # by profile name
+
+# Or just materialize the dir and wire the env yourself
+eval "$(ccs config-dir 2 | tail -1)"   # exports CLAUDE_CONFIG_DIR
+```
+
+`ccs exec` materializes the account's `.claude.json` + credentials into `~/.claude-switch-backup/isolated/<n>-<email>/` (override with `--dir PATH`) and runs the command with `CLAUDE_CONFIG_DIR` pointed there. Because it never touches the global store, several `ccs exec` processes can run as different accounts concurrently with no locking. Put any ccs options before `exec`; everything after `--` is passed to the command verbatim.
+
+> ⚠️ **Platform support:** parallel isolation works on **Linux/WSL** (credentials are file-based, so a copied credential just works). It does **not** work on **macOS** with current Claude Code (2.1.x): Claude binds the OAuth token to the live session, so a *copied* token — whether written as a file or into the per-dir Keychain item — is rejected with `401` in an isolated config dir, even when fresh ([#29](https://github.com/fairy-pitta/cc-account-switcher/issues/29)). The only way to run different accounts in parallel on macOS is to `claude auth login` **inside each** `CLAUDE_CONFIG_DIR` so each owns its own credentials. Note: the **rate-limit auto-switch (sequential rotation) works on macOS** — it swaps the single active account rather than running parallel copies.
 
 ### Diagnostics
 
