@@ -1,0 +1,138 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit configuration — https://docs.coderabbit.ai/getting-started/configure-coderabbit
+language: en-US
+
+# Keep reviews terse and technical — this is a small CLI utility, not a product surface.
+tone_instructions: >-
+  Be concise and technical. Prioritize correctness, portability, and credential
+  safety over style nits. Skip praise; lead with the actionable point.
+
+early_access: false
+
+reviews:
+  # "assertive" surfaces more issues — appropriate for a tool that rewrites a
+  # machine-global credential store. Switch to "chill" if reviews feel noisy.
+  profile: assertive
+  request_changes_workflow: false
+
+  # Summaries & walkthrough
+  high_level_summary: true
+  changed_files_summary: true
+  collapse_walkthrough: false
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  review_status: true
+  poem: false
+
+  # Issue / PR linkage — this repo's work is issue-driven (#15, #20, phases).
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+
+  # Labels & reviewers (suggest only; humans stay in control of applying them).
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: true
+  auto_assign_reviewers: false
+  labeling_instructions:
+    - label: bug
+      instructions: Apply when the change fixes incorrect behavior.
+    - label: enhancement
+      instructions: Apply when the change adds or improves a feature.
+    - label: documentation
+      instructions: Apply when only docs (README, CHANGELOG, CONTRIBUTING) change.
+    - label: ci
+      instructions: Apply when GitHub Actions workflows or release automation change.
+
+  # Skip binary assets and generated docs; focus the review on shell + CI + docs.
+  path_filters:
+    - "!assets/**"
+    - "!**/*.gif"
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.jpeg"
+    - "!**/*.webp"
+    - "!**/*.svg"
+
+  path_instructions:
+    - path: "**"
+      instructions: >-
+        Cross-platform compatibility is mandatory: whatever the change is,
+        confirm it works on BOTH macOS and Windows. This is a Bash tool, so
+        "Windows" means WSL / Git Bash — flag anything that assumes one OS only,
+        e.g. macOS Keychain vs a Windows/WSL file-based credential store,
+        hardcoded `/tmp` or `/Users/...` paths, `flock` and other tools that may
+        be missing on macOS or Windows, BSD-vs-GNU flag differences
+        (`sed`, `stat`, `date`, `mktemp`), and CRLF/line-ending assumptions.
+        Note: CI only runs ubuntu + macos, so Windows/WSL regressions will not
+        be caught by CI — call them out explicitly.
+    - path: "**/*.sh"
+      instructions: >-
+        POSIX-leaning Bash without Bash 4+ features (associative arrays, ${var,,}, etc.)
+        for macOS /bin/bash 3.2 compatibility. Flag unquoted expansions, missing
+        `set -euo pipefail` guards, and non-atomic read-modify-write of
+        credential/state files (race conditions). Prefer the portable
+        temp-file-then-rename pattern as the primary atomicity mechanism; treat
+        `flock` only as an optional guard where available (note: `flock` is
+        absent on stock macOS, so it must not be the sole mechanism). Also flag
+        any handling of secrets that risks logging, echoing, or leaking them.
+    - path: "test/**/*.bats"
+      instructions: >-
+        Bats tests. Check that new behavior is covered and that tests stay isolated
+        (no reliance on the real Keychain or a real ~/.claude config — use temp
+        HOME / CLAUDE_CONFIG_DIR fixtures). Prefer deterministic, hermetic assertions.
+    - path: ".github/workflows/**"
+      instructions: >-
+        GitHub Actions. Watch for unpinned/floating action versions, missing least
+        privilege `permissions:`, secret exposure in logs, and OS-matrix gaps
+        (currently ubuntu + macos only — no Windows runner).
+    - path: "Makefile"
+      instructions: >-
+        Flag tabs-vs-spaces recipe issues, non-portable shell builtins, and targets
+        that assume GNU coreutils.
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    base_branches:
+      - main
+
+  # Bash project: docstring generation doesn't apply; nudge for test coverage instead.
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: true
+
+  tools:
+    shellcheck:
+      enabled: true       # mirrors CI (shellcheck ccswitch.sh)
+    gitleaks:
+      enabled: true       # secret scanning — critical for a credential-switching tool
+    actionlint:
+      enabled: true       # lint .github/workflows
+    yamllint:
+      enabled: true       # this config + workflow YAML
+    markdownlint:
+      enabled: true       # README / CHANGELOG / CONTRIBUTING
+    checkmake:
+      enabled: true       # lint the Makefile
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  # Treat CONTRIBUTING.md (and any docs guidelines) as repo coding guidelines.
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "CONTRIBUTING.md"
+      - ".github/**/*.md"
+  # Learn from this repo's own issues/PRs/review history when reviewing.
+  learnings:
+    scope: auto
+  issues:
+    scope: auto
+  pull_requests:
+    scope: auto
