@@ -278,6 +278,34 @@ get_current_account() {
     echo "${email:-none}"
 }
 
+# Decode a hex string (bare "7b22…" or "0x7b22…") to raw bytes. Pure Bash so we
+# don't depend on xxd/perl, which may be absent (especially on Linux/WSL CI).
+_hex_decode() {
+    local hex="${1#0x}" i
+    for (( i = 0; i < ${#hex}; i += 2 )); do
+        printf '%b' "\\x${hex:i:2}"
+    done
+}
+
+# Read a generic-password secret from the macOS Keychain.
+#
+# When Claude Code stores the credential as binary data (newer versions do),
+# `security -w` prints it as a hex dump ("7b22…" or "0x7b22…") instead of the
+# JSON text. Credential JSON always contains non-hex bytes ('{', '"', …), so an
+# all-hex, even-length payload is unambiguously a hex dump and is decoded back to
+# JSON. Anything else (raw JSON, or empty when the item is missing) is returned
+# as-is. Without this, callers get hex and every `jq` on the credential fails.
+keychain_read() {
+    local service="$1" raw stripped
+    raw=$(security find-generic-password -s "$service" -w 2>/dev/null) || true
+    stripped="${raw#0x}"
+    if [[ -n "$stripped" && "$stripped" =~ ^[0-9a-fA-F]+$ && $(( ${#stripped} % 2 )) -eq 0 ]]; then
+        _hex_decode "$raw"
+    else
+        printf '%s' "$raw"
+    fi
+}
+
 # Read credentials based on platform
 read_credentials() {
     local platform
@@ -285,7 +313,7 @@ read_credentials() {
 
     case "$platform" in
         macos)
-            security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo ""
+            keychain_read "Claude Code-credentials"
             ;;
         linux|wsl)
             if [[ -f "$HOME/.claude/.credentials.json" ]]; then
@@ -324,7 +352,7 @@ read_account_credentials() {
 
     case "$platform" in
         macos)
-            security find-generic-password -s "Claude Code-Account-${account_num}-${email}" -w 2>/dev/null || echo ""
+            keychain_read "Claude Code-Account-${account_num}-${email}"
             ;;
         linux|wsl)
             local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
@@ -556,9 +584,9 @@ cmd_check() {
             macos)
                 if security find-generic-password -s "Claude Code-Account-${num}-${email}" -w >/dev/null 2>&1; then
                     echo "  [OK] Keychain entry exists"
-                    # Validate it's valid JSON
+                    # Validate it's valid JSON (decoding the hex form security -w may emit)
                     local kc_creds
-                    kc_creds=$(security find-generic-password -s "Claude Code-Account-${num}-${email}" -w 2>/dev/null)
+                    kc_creds=$(keychain_read "Claude Code-Account-${num}-${email}")
                     if echo "$kc_creds" | jq . >/dev/null 2>&1; then
                         echo "  [OK] Keychain credentials are valid JSON"
                     else
@@ -1415,10 +1443,10 @@ materialize_config_dir() {
     fi
     chmod 600 "$dest/.claude.json" 2>/dev/null || true
 
-    # Write credentials as a file. On Linux/WSL this is where Claude Code reads
-    # them. On macOS credentials normally live in the Keychain — see the warning
-    # emitted by the callers; whether CLAUDE_CONFIG_DIR redirects creds to this
-    # file on macOS needs live verification.
+    # Write credentials as a file. Claude Code reads $CLAUDE_CONFIG_DIR/.credentials.json
+    # here on both Linux/WSL and macOS — verified that setting CLAUDE_CONFIG_DIR makes
+    # macOS Claude Code read this file and bypass the shared Keychain (read_credentials
+    # decodes the hex form `security -w` returns so this stays valid JSON).
     if ! printf '%s' "$creds" | jq . > "$dest/.credentials.json" 2>/dev/null; then
         echo "Error: stored credentials for Account-$account_num are not valid JSON" >&2
         return 1
@@ -1428,13 +1456,13 @@ materialize_config_dir() {
     return 0
 }
 
-# Print a one-time warning on macOS about the Keychain caveat.
-_isolation_macos_warning() {
+# On macOS, note that the Keychain credential is materialized into the isolated
+# dir. Isolation is verified to work (Claude Code reads the per-dir credentials
+# file and bypasses the shared Keychain when CLAUDE_CONFIG_DIR is set).
+_isolation_macos_note() {
     if [[ "$(detect_platform)" == "macos" ]]; then
-        echo "Warning: on macOS, Claude Code stores credentials in the Keychain." >&2
-        echo "         CLAUDE_CONFIG_DIR isolation is verified on Linux/WSL; on macOS the" >&2
-        echo "         per-agent credential file may be ignored in favor of the shared" >&2
-        echo "         Keychain, in which case isolated agents share one account." >&2
+        echo "Note: macOS Keychain credentials are materialized into the isolated dir;" >&2
+        echo "      Claude Code reads them from there (CLAUDE_CONFIG_DIR isolation verified)." >&2
     fi
 }
 
@@ -1469,7 +1497,7 @@ cmd_config_dir() {
         exit 1
     fi
 
-    _isolation_macos_warning
+    _isolation_macos_note
     echo "$dest"
     echo "export CLAUDE_CONFIG_DIR=\"$dest\""
 }
@@ -1531,7 +1559,7 @@ cmd_exec() {
         exit 1
     fi
 
-    _isolation_macos_warning
+    _isolation_macos_note
     # Replace this process with the command, scoped to the isolated config dir.
     CLAUDE_CONFIG_DIR="$dest" exec "${cmd[@]}"
 }

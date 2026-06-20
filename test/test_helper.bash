@@ -93,7 +93,13 @@ case "$cmd" in
         done
         file="$KEYCHAIN_DIR/$(_sanitize_service "$service")"
         if [[ -f "$file" ]]; then
-            cat "$file"
+            if [[ "${MOCK_SECURITY_HEX:-0}" == "1" ]]; then
+                # Mimic real macOS `security -w`, which prints a bare hex dump
+                # when Claude Code stores the secret as binary data.
+                od -An -v -tx1 "$file" | tr -d ' \n'
+            else
+                cat "$file"
+            fi
         else
             exit 44
         fi

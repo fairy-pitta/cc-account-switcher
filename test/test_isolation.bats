@@ -50,6 +50,39 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+# --- macOS Keychain hex-dump credentials (regression) -------------------------
+# Newer Claude Code stores the credential as binary data, so macOS `security -w`
+# returns a hex dump ("7b22…") instead of JSON. Without decoding, every jq on the
+# credential fails and the isolated dir gets an empty, unauthenticated creds file.
+
+@test "keychain_read decodes a hex-dump secret back to JSON" {
+    export MOCK_SECURITY_HEX=1
+    source_ccswitch_functions
+    run keychain_read "Claude Code-credentials"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.access_token' >/dev/null
+}
+
+@test "materialize decodes hex Keychain credentials for the active account" {
+    export MOCK_SECURITY_HEX=1
+    source_ccswitch_functions
+    local dest="$TEST_HOME/iso-hex1"
+    run materialize_config_dir "1" "$dest"
+    [ "$status" -eq 0 ]
+    run jq -e '.access_token' "$dest/.credentials.json"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.access_token' "$dest/.credentials.json")" = "at-user1@example.com" ]
+}
+
+@test "materialize decodes hex Keychain credentials for a backup account" {
+    export MOCK_SECURITY_HEX=1
+    source_ccswitch_functions
+    local dest="$TEST_HOME/iso-hex2"
+    run materialize_config_dir "2" "$dest"
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.access_token' "$dest/.credentials.json")" = "at-user2@example.com" ]
+}
+
 # --- ccs config-dir -----------------------------------------------------------
 
 @test "config-dir materializes and prints the dir and export line" {

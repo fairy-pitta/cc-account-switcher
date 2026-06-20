@@ -177,7 +177,7 @@ eval "$(ccs config-dir 2 | tail -1)"   # exports CLAUDE_CONFIG_DIR
 
 `ccs exec` materializes the account's `.claude.json` + credentials into `~/.claude-switch-backup/isolated/<n>-<email>/` (override with `--dir PATH`) and runs the command with `CLAUDE_CONFIG_DIR` pointed there. Because it never touches the global store, several `ccs exec` processes can run as different accounts concurrently with no locking. Put any ccs options before `exec`; everything after `--` is passed to the command verbatim.
 
-> ⚠️ **macOS caveat (needs verification):** on Linux/WSL, credentials live in `$CLAUDE_CONFIG_DIR/.credentials.json`, so isolation works as described. On macOS credentials are normally stored in the **Keychain**; whether setting `CLAUDE_CONFIG_DIR` redirects Claude Code to the per-dir credential file (rather than the shared Keychain) has not been verified. If it doesn't, isolated agents on macOS may still share one account. `ccs exec` prints a warning on macOS.
+> ℹ️ **Platform note (verified):** on Linux/WSL, credentials live in `$CLAUDE_CONFIG_DIR/.credentials.json`. On macOS they normally live in the **Keychain**, but setting `CLAUDE_CONFIG_DIR` makes Claude Code read the per-dir `.credentials.json` and **bypass the shared Keychain** — verified against Claude Code 2.1.x, so isolated agents really do run as different accounts. `ccs exec` materializes the Keychain credential into the dir for you (decoding the hex form `security` returns).
 
 ### Diagnostics
 
