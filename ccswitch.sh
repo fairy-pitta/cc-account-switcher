@@ -579,12 +579,19 @@ capture_resume_session_id() {
 restart_claude_code_resume() {
     local sid="$1" bin
     bin=$(command -v claude 2>/dev/null || echo "")
-    if [[ -z "$bin" ]]; then
+    if [[ -z "$bin" || ! -x "$bin" ]]; then
         echo "Switched. 'claude' not found in PATH — resume manually:"
         echo "  $(build_resume_command claude "$sid")"
         return 0
     fi
     kill_claude_processes
+    # Re-check: the binary could have vanished between lookup and exec; a failed
+    # exec would terminate the user's shell, so fall back to a clear message.
+    if [[ ! -x "$bin" ]]; then
+        echo "Error: '$bin' is no longer executable — resume manually:"
+        echo "  $(build_resume_command claude "$sid")"
+        return 1
+    fi
     if [[ -n "$sid" ]]; then
         echo "Resuming conversation under the new account (forked session)..."
         exec "$bin" --resume "$sid" --fork-session
@@ -610,6 +617,9 @@ restart_claude_code() {
 # Handle restart logic after a switch
 handle_restart_after_switch() {
     if [[ "$RESUME_AFTER" == true ]]; then
+        if [[ -n "$RESTART_FLAG" && "${CCS_SILENT:-}" != "1" ]]; then
+            echo "Note: --restart/--no-restart is ignored when --resume is given." >&2
+        fi
         restart_claude_code_resume "$RESUME_SID"
         return
     fi
@@ -1389,6 +1399,9 @@ perform_switch() {
         release_switch_lock
         if [[ "${CCS_SILENT:-}" != "1" ]]; then
             echo "Already on Account-$target_account ($target_email)."
+        fi
+        if [[ "$RESUME_AFTER" == true ]]; then
+            restart_claude_code_resume "$RESUME_SID"
         fi
         return
     fi

@@ -75,8 +75,24 @@ _setup_two_accounts_with_session() {
 
     run run_ccswitch to 2 --resume
     [ -f "$TEST_HOME/claude-argv" ]
-    run cat "$TEST_HOME/claude-argv"
-    [[ "$output" != *"--resume"* ]]
+    [ ! -s "$TEST_HOME/claude-argv" ]   # no args passed -> fresh launch
+}
+
+@test "test_sw_with_resume_relaunches_with_fork_session" {
+    _setup_two_accounts_with_session
+    _install_claude_mock
+
+    run run_ccswitch sw --resume
+    [ -f "$TEST_HOME/claude-argv" ]
+    grep -q -- "--resume sess-xyz --fork-session" "$TEST_HOME/claude-argv"
+}
+
+@test "test_to_already_active_with_resume_still_relaunches" {
+    _setup_two_accounts_with_session
+    _install_claude_mock
+    run run_ccswitch to 1 --resume
+    [ -f "$TEST_HOME/claude-argv" ]
+    grep -q -- "--resume sess-xyz --fork-session" "$TEST_HOME/claude-argv"
 }
 
 @test "test_dry_run_with_resume_shows_plan_and_does_not_switch" {
