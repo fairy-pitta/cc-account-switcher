@@ -552,6 +552,26 @@ kill_claude_processes() {
     fi
 }
 
+# Build the relaunch command for a fork-resume restart.
+# Args: <claude_bin> <session_id>. With a session id -> resume+fork; without -> fresh.
+build_resume_command() {
+    local bin="$1" sid="$2"
+    if [[ -n "$sid" ]]; then
+        printf '%s --resume %s --fork-session' "$bin" "$sid"
+    else
+        printf '%s' "$bin"
+    fi
+}
+
+# Echo the lastSessionId for the current working directory from the (outgoing)
+# .claude.json, or empty if none. MUST be called before a switch swaps the file.
+capture_resume_session_id() {
+    local cfg
+    cfg=$(get_claude_config_path)
+    [[ -f "$cfg" ]] || return 0
+    jq -r --arg c "$PWD" '.projects[$c].lastSessionId // empty' "$cfg" 2>/dev/null || true
+}
+
 # Restart Claude Code
 restart_claude_code() {
     echo "Restarting Claude Code..."
