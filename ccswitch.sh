@@ -144,6 +144,12 @@ resolve_account_identifier() {
         account_num=$(jq -r --arg profile "$identifier" '.accounts | to_entries[] | select(.value.profile == $profile) | .key' "$SEQUENCE_FILE" 2>/dev/null)
         if [[ -n "$account_num" && "$account_num" != "null" ]]; then
             echo "$account_num"
+            return
+        fi
+        # Try endpoint label
+        account_num=$(jq -r --arg label "$identifier" '.accounts | to_entries[] | select(.value.label == $label) | .key' "$SEQUENCE_FILE" 2>/dev/null)
+        if [[ -n "$account_num" && "$account_num" != "null" ]]; then
+            echo "$account_num"
         else
             echo ""
         fi
@@ -1315,16 +1321,10 @@ cmd_remove_account() {
     if [[ "$identifier" =~ ^[0-9]+$ ]]; then
         account_num="$identifier"
     else
-        # Validate email format
-        if ! validate_email "$identifier"; then
-            echo "Error: Invalid email format: $identifier"
-            exit 1
-        fi
-
-        # Resolve email to account number
+        # Resolve email / profile / endpoint label to an account number.
         account_num=$(resolve_account_identifier "$identifier")
         if [[ -z "$account_num" ]]; then
-            echo "Error: No account found with email: $identifier"
+            echo "Error: No account found matching: $identifier"
             exit 1
         fi
     fi
@@ -1338,7 +1338,7 @@ cmd_remove_account() {
     fi
 
     local email
-    email=$(echo "$account_info" | jq -r '.email')
+    email=$(echo "$account_info" | jq -r '.label // .email')
 
     local active_account
     active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
@@ -1424,12 +1424,14 @@ cmd_list() {
     echo "Accounts:"
     jq -r --arg active "$active_account_num" '
         .sequence[] as $num |
-        .accounts["\($num)"] |
-        (if .profile then " [\(.profile)]" else "" end) as $prof |
+        .accounts["\($num)"] as $a |
+        ($a.label // $a.email) as $id |
+        (if $a.authType == "endpoint" then " [endpoint]"
+         elif $a.profile then " [\($a.profile)]" else "" end) as $tag |
         if "\($num)" == $active then
-            "  \($num): \(.email)\($prof) (active)"
+            "  \($num): \($id)\($tag) (active)"
         else
-            "  \($num): \(.email)\($prof)"
+            "  \($num): \($id)\($tag)"
         end
     ' "$SEQUENCE_FILE"
 }

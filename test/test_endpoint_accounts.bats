@@ -153,3 +153,30 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"label"* ]]
 }
+
+@test "test_resolve_identifier_matches_endpoint_label" {
+    seed_mixed_accounts
+    run /bin/bash -c "source '$CCSWITCH_SCRIPT'; resolve_account_identifier openrouter"
+    [[ "$output" == "2" ]]
+}
+
+@test "test_list_shows_endpoint_tag" {
+    seed_mixed_accounts
+    create_fake_claude_config "user1@example.com" "uuid-1"
+    run run_ccswitch ls
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"openrouter"* ]]
+    [[ "$output" == *"[endpoint]"* ]]
+}
+
+@test "test_remove_endpoint_by_label_deletes_secret" {
+    run_ccswitch add-endpoint gone --base-url https://g.test/v1 --key-stdin <<< "sk-gone"
+    num=$(jq -r '.accounts | to_entries[] | select(.value.label=="gone") | .key' "$SEQUENCE_FILE")
+    run run_ccswitch rm gone <<< "y"
+    [ "$status" -eq 0 ]
+    run jq -r --arg n "$num" '.accounts[$n] // "removed"' "$SEQUENCE_FILE"
+    [[ "$output" == "removed" ]]
+    # Secret slot cleared.
+    run /bin/bash -c "source '$CCSWITCH_SCRIPT'; endpoint_secret $num"
+    [[ -z "$output" ]]
+}
