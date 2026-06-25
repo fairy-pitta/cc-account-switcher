@@ -46,3 +46,23 @@ seed() {
     run run_ccswitch ls
     [[ "$output" == *"ep [endpoint] (active)"* ]]
 }
+
+@test "test_status_shows_endpoint_base_url_when_active" {
+    seed
+    run_ccswitch --no-restart to ep
+    run run_ccswitch status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ep"* ]]
+    [[ "$output" == *"https://ep.test/v1"* ]]
+    # Secret never printed.
+    [[ "$output" != *"sk-ep"* ]]
+}
+
+@test "test_exec_endpoint_exports_env_vars" {
+    seed
+    ep=$(jq -r '.accounts | to_entries[] | select(.value.label=="ep") | .key' "$SEQUENCE_FILE")
+    run run_ccswitch exec "$ep" -- /bin/bash -c 'echo "U=$ANTHROPIC_BASE_URL K=$ANTHROPIC_API_KEY"'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"U=https://ep.test/v1"* ]]
+    [[ "$output" == *"K=sk-ep"* ]]
+}

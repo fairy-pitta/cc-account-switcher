@@ -893,6 +893,25 @@ cmd_status() {
         exit 0
     fi
 
+    local _active_num
+    _active_num=$(effective_active_account_num)
+    if [[ -n "$_active_num" ]] && is_endpoint_account "$_active_num"; then
+        echo "Account Status"
+        echo "=============="
+        echo ""
+        echo "Current account: $(account_display_id "$_active_num") [endpoint]"
+        echo "Account number:  $_active_num"
+        echo "Base URL:        $(account_field "$_active_num" baseUrl)"
+        local _m; _m=$(account_field "$_active_num" model)
+        [[ -n "$_m" ]] && echo "Model:           $_m"
+        echo "Auth:            $(account_field "$_active_num" tokenHeader api_key) (key hidden)"
+        local _lu; _lu=$(jq -r '.lastUpdated // empty' "$SEQUENCE_FILE" 2>/dev/null)
+        [[ -n "$_lu" ]] && echo "Last switch:     $_lu"
+        echo ""
+        echo "Note: settings.json env applies on Claude Code restart."
+        return 0
+    fi
+
     local current_email
     current_email=$(get_current_account)
 
@@ -1795,11 +1814,30 @@ materialize_config_dir() {
     local account_num="$1"
     local dest="$2"
 
-    local email
-    email=$(jq -r --arg n "$account_num" '.accounts[$n].email // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    local email auth
+    auth=$(account_auth_type "$account_num")
+    email=$(account_display_id "$account_num")
     if [[ -z "$email" ]]; then
         echo "Error: Account-$account_num not found" >&2
         return 1
+    fi
+
+    if [[ "$auth" == "endpoint" ]]; then
+        # Endpoint isolation is just an env-scoped dir: write a settings.json
+        # with the endpoint env so `CLAUDE_CONFIG_DIR=<dest> claude` uses it.
+        local ep_base ep_th ep_model ep_token token_var
+        ep_base=$(account_field "$account_num" baseUrl)
+        ep_th=$(account_field "$account_num" tokenHeader api_key)
+        ep_model=$(account_field "$account_num" model)
+        ep_token=$(endpoint_secret "$account_num")
+        token_var="ANTHROPIC_API_KEY"; [[ "$ep_th" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
+        mkdir -p "$dest" && chmod 700 "$dest" 2>/dev/null || true
+        jq -nc --arg url "$ep_base" --arg tvar "$token_var" --arg tok "$ep_token" --arg model "$ep_model" '
+            {env: ({ANTHROPIC_BASE_URL:$url, ($tvar):$tok}
+                   + (if $model != "" then {ANTHROPIC_MODEL:$model} else {} end))}
+        ' > "$dest/settings.json" || return 1
+        chmod 600 "$dest/settings.json" 2>/dev/null || true
+        return 0
     fi
 
     local active cfg creds
@@ -1881,7 +1919,7 @@ cmd_config_dir() {
     fi
 
     local email
-    email=$(jq -r --arg n "$account_num" '.accounts[$n].email' "$SEQUENCE_FILE")
+    email=$(account_display_id "$account_num")
     [[ -z "$dest" ]] && dest="$ISOLATED_DIR/${account_num}-${email}"
 
     setup_directories
@@ -1943,7 +1981,7 @@ cmd_exec() {
     fi
 
     local email
-    email=$(jq -r --arg n "$account_num" '.accounts[$n].email' "$SEQUENCE_FILE")
+    email=$(account_display_id "$account_num")
     [[ -z "$dest" ]] && dest="$ISOLATED_DIR/${account_num}-${email}"
 
     setup_directories
@@ -1953,7 +1991,22 @@ cmd_exec() {
 
     _isolation_macos_note
     # Replace this process with the command, scoped to the isolated config dir.
-    CLAUDE_CONFIG_DIR="$dest" exec "${cmd[@]}"
+    if is_endpoint_account "$account_num"; then
+        local ep_th token_var ep_base ep_model
+        ep_th=$(account_field "$account_num" tokenHeader api_key)
+        token_var="ANTHROPIC_API_KEY"; [[ "$ep_th" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
+        ep_base=$(account_field "$account_num" baseUrl)
+        ep_model=$(account_field "$account_num" model)
+        export ANTHROPIC_BASE_URL="$ep_base"
+        # Only export a model override when one is configured, so an unset model
+        # doesn't blank out Claude Code's default (mirrors materialize_config_dir).
+        [[ -n "$ep_model" ]] && export ANTHROPIC_MODEL="$ep_model"
+        export CLAUDE_CONFIG_DIR="$dest"
+        export "$token_var=$(endpoint_secret "$account_num")"
+        exec "${cmd[@]}"
+    else
+        CLAUDE_CONFIG_DIR="$dest" exec "${cmd[@]}"
+    fi
 }
 
 # --- Endpoint health probe ------------------------------------------------
