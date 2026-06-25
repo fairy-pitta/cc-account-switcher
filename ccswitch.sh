@@ -1245,6 +1245,35 @@ perform_switch() {
     current_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
     current_email=$(get_current_account)
 
+    # Reconcile the active account number against reality before touching the
+    # credential store. sequence.json's activeAccountNumber can drift from the
+    # credential actually live (external `claude login`, a crash mid-switch).
+    # The email in .claude.json is the source of truth for whose credential is
+    # live; trusting a stale number would back the live credential up under the
+    # wrong slot and restore a stale one, destroying the working session.
+    local real_current_account
+    real_current_account=$(jq -r --arg email "$current_email" '
+        (.accounts | to_entries[] | select(.value.email == $email) | .key) // empty
+    ' "$SEQUENCE_FILE" 2>/dev/null)
+
+    if [[ -z "$real_current_account" ]]; then
+        release_switch_lock
+        if [[ "${CCS_SILENT:-}" != "1" ]]; then
+            echo "Error: the active account ($current_email) is not managed by ccs."
+            echo "Run 'ccs add' before switching so its credentials aren't lost."
+        else
+            echo "Error: active account ($current_email) unmanaged; skipping switch." >&2
+        fi
+        exit 1
+    fi
+
+    if [[ "$real_current_account" != "$current_account" ]]; then
+        if [[ "${CCS_SILENT:-}" != "1" ]]; then
+            echo "Note: corrected active account $current_account -> $real_current_account (was out of sync)."
+        fi
+        current_account="$real_current_account"
+    fi
+
     # No-op guard: if we're already on the target (e.g. a concurrent switch beat
     # us to it), release and return without thrashing the credential store.
     if [[ "$current_account" == "$target_account" ]]; then
