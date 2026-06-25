@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS Keychain credentials are now decoded correctly. Newer Claude Code stores the credential as binary data, so `security -w` returns a hex dump (`7b22…`) rather than JSON; this broke `ccs exec`/`config-dir` (empty, unauthenticated isolated dirs) and could corrupt credentials on a multi-account switch. `read_credentials` now decodes the hex form back to JSON ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
 - Concurrent account switches are now serialized with an exclusive lock (`mkdir`-based, portable to macOS which lacks `flock`), so orchestrator heartbeats crossing the threshold at once can no longer race or thrash accounts ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
 - Switching to the already-active account is now a fast no-op instead of redundantly rewriting the credential store
+- Token introspection now reads Claude Code 2.1.x's nested credential format (`claudeAiOauth.accessToken` / `expiresAt`) with a fallback to the legacy flat shape. Previously the usage API read and `ccs status` expiry read a flat `access_token` that does not exist on current macOS, so rate-limit auto-switch could not fetch usage and `ccs status` could not show token expiry on macOS ([#31](https://github.com/fairy-pitta/cc-account-switcher/issues/31))
+- Refreshed tokens are written back in the credential's own shape (nested or flat), as single-line JSON
+- When an account's refresh token is revoked, `ccs` now prints a clear "needs re-login — run: claude /login" hint instead of failing silently
 
 ## [0.3.1] - 2026-06-03
 
