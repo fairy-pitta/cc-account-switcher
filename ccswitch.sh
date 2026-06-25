@@ -565,6 +565,17 @@ clear_endpoint_env() {
     write_json "$file" "$updated"
 }
 
+# Endpoint secrets are stored in the same per-account credential slot used for
+# OAuth, wrapped as {"endpointKey":"<token>"} so the existing Keychain/file
+# path (read/write_account_credentials) is reused and the raw key never lands
+# in sequence.json.
+endpoint_secret() {
+    local num="$1" label creds
+    label=$(account_field "$num" "label")
+    creds=$(read_account_credentials "$num" "$label")
+    printf '%s' "$creds" | jq -r '.endpointKey // empty' 2>/dev/null
+}
+
 # Initialize sequence.json if it doesn't exist
 init_sequence_file() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
@@ -1184,6 +1195,105 @@ cmd_add_account() {
     write_json "$SEQUENCE_FILE" "$updated_sequence"
 
     echo "Added Account $account_num: $current_email"
+}
+
+# Add a custom-endpoint account.
+# Usage: ccs add-endpoint <label> --base-url <URL> [--model <M>]
+#        [--token-header api_key|auth_token] [--key-stdin]
+cmd_add_endpoint() {
+    setup_directories
+    init_sequence_file
+
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: ccs add-endpoint <label> --base-url <URL> [--model <M>] [--token-header api_key|auth_token] [--key-stdin]"
+        exit 1
+    fi
+
+    local label="$1"; shift
+    if [[ -z "$label" || "$label" == --* ]]; then
+        echo "Error: a non-empty label is required"
+        exit 1
+    fi
+    local base_url="" model="" token_header="api_key" key_stdin=false
+    # Guard value-taking options so a missing value gives a clear error instead
+    # of tripping `set -u` ($2: unbound variable).
+    _require_value() { [[ $# -ge 2 ]] || { echo "Error: $1 requires a value"; exit 1; }; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --base-url)     _require_value "$@"; base_url="$2"; shift 2 ;;
+            --model)        _require_value "$@"; model="$2"; shift 2 ;;
+            --token-header) _require_value "$@"; token_header="$2"; shift 2 ;;
+            --key-stdin)    key_stdin=true; shift ;;
+            *) echo "Error: unknown option '$1'"; exit 1 ;;
+        esac
+    done
+
+    if [[ -z "$base_url" ]]; then
+        echo "Error: --base-url is required"
+        exit 1
+    fi
+    if [[ "$token_header" != "api_key" && "$token_header" != "auth_token" ]]; then
+        echo "Error: --token-header must be 'api_key' or 'auth_token'"
+        exit 1
+    fi
+    if [[ ! "$base_url" =~ ^https?:// ]]; then
+        echo "Error: --base-url must start with http:// or https://"
+        exit 1
+    fi
+
+    # Reject a duplicate label (or an email/profile collision).
+    # resolve_account_identifier checks email and profile; also check endpoint labels.
+    local existing_num
+    existing_num=$(resolve_account_identifier "$label")
+    if [[ -z "$existing_num" ]]; then
+        existing_num=$(jq -r --arg lbl "$label" \
+            '.accounts | to_entries[] | select(.value.label == $lbl) | .key' \
+            "$SEQUENCE_FILE" 2>/dev/null)
+    fi
+    if [[ -n "$existing_num" ]]; then
+        echo "Error: an account named '$label' already exists"
+        exit 1
+    fi
+
+    # Read the secret without echoing it / leaving it in shell history.
+    local token=""
+    if [[ "$key_stdin" == true ]]; then
+        IFS= read -r token || true
+    else
+        read -rs -p "API key/token for '$label': " token
+        echo ""
+    fi
+    if [[ -z "$token" ]]; then
+        echo "Error: no API key/token provided"
+        exit 1
+    fi
+
+    local account_num
+    account_num=$(get_next_account_number)
+
+    # Store the secret via the existing per-account credential path.
+    local cred_json
+    cred_json=$(jq -nc --arg k "$token" '{endpointKey:$k}')
+    write_account_credentials "$account_num" "$label" "$cred_json"
+
+    local updated
+    updated=$(jq \
+        --arg num "$account_num" --arg label "$label" --arg url "$base_url" \
+        --arg model "$model" --arg th "$token_header" \
+        --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .accounts[$num] = ({
+            authType: "endpoint",
+            label: $label,
+            baseUrl: $url,
+            tokenHeader: $th,
+            added: $now
+        } + (if $model != "" then {model: $model} else {} end))
+        | .sequence += [$num | tonumber]
+        | .lastUpdated = $now
+    ' "$SEQUENCE_FILE")
+    write_json "$SEQUENCE_FILE" "$updated"
+
+    echo "Added endpoint Account $account_num: $label ($base_url)"
 }
 
 # Remove account
@@ -2340,6 +2450,8 @@ show_usage() {
     echo ""
     echo "Account Management:"
     echo "  add                              Add current account to managed accounts"
+    echo "  add-endpoint <label> --base-url <URL> [--model M] [--token-header api_key|auth_token]"
+    echo "                                   Add a custom ANTHROPIC_BASE_URL endpoint as an account"
     echo "  rm <num|email>                   Remove account by number or email"
     echo "  ls                               List all managed accounts"
     echo ""
@@ -2455,6 +2567,10 @@ main() {
     case "${1:-}" in
         add|--add-account)
             cmd_add_account
+            ;;
+        add-endpoint)
+            shift
+            cmd_add_endpoint "$@"
             ;;
         rm|--remove-account)
             shift

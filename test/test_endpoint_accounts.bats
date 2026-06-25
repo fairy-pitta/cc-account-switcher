@@ -109,3 +109,47 @@ EOF
     [ "$status" -eq 0 ]
     [ ! -f "$HOME/.claude/settings.json" ]
 }
+
+@test "test_add_endpoint_creates_account_and_stores_secret" {
+    run run_ccswitch add-endpoint openrouter \
+        --base-url https://openrouter.ai/api/v1 --token-header api_key --key-stdin <<< "sk-or-123"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"openrouter"* ]]
+
+    # Metadata recorded, no secret in plaintext JSON.
+    run jq -r '.accounts | to_entries[] | select(.value.label=="openrouter") | .value.authType' "$SEQUENCE_FILE"
+    [[ "$output" == "endpoint" ]]
+    run grep -c "sk-or-123" "$SEQUENCE_FILE"
+    [[ "$output" == "0" ]]
+
+    # Secret retrievable via the credential store (mock keychain).
+    num=$(jq -r '.accounts | to_entries[] | select(.value.label=="openrouter") | .key' "$SEQUENCE_FILE")
+    run /bin/bash -c "source '$CCSWITCH_SCRIPT'; endpoint_secret $num"
+    [[ "$output" == "sk-or-123" ]]
+}
+
+@test "test_add_endpoint_rejects_duplicate_label" {
+    run_ccswitch add-endpoint dup --base-url https://a.test/v1 --key-stdin <<< "k1"
+    run run_ccswitch add-endpoint dup --base-url https://b.test/v1 --key-stdin <<< "k2"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"already"* ]]
+}
+
+@test "test_add_endpoint_requires_base_url" {
+    run run_ccswitch add-endpoint nobaseurl --key-stdin <<< "k"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"base-url"* ]]
+}
+
+@test "test_add_endpoint_option_without_value_errors_cleanly" {
+    run run_ccswitch add-endpoint myep --base-url
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"requires a value"* ]]
+    [[ "$output" != *"unbound variable"* ]]
+}
+
+@test "test_add_endpoint_rejects_empty_label" {
+    run run_ccswitch add-endpoint "" --base-url https://x.test/v1 --key-stdin <<< "k"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"label"* ]]
+}
