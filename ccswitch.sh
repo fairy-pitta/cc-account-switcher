@@ -2186,6 +2186,26 @@ cmd_rate_check() {
         max_age="${max_age:-$DEFAULT_CACHE_TTL}"
     fi
 
+    # Active account type decides how we judge "over threshold". Endpoints have
+    # no usage API, so they are probed reactively; oauth uses the usage cache.
+    local active_num over_threshold=false usage_int="n/a"
+    active_num=$(jq -r '.activeAccountNumber // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+
+    if [[ -n "$active_num" ]] && is_endpoint_account "$active_num"; then
+        if probe_endpoint_health "$active_num"; then
+            if [[ "$hook_mode" != true ]]; then
+                echo "Endpoint $(account_display_id "$active_num") healthy — OK"
+            fi
+            exit 0
+        fi
+        over_threshold=true
+        usage_int="unhealthy"
+        if [[ "$hook_mode" != true ]]; then
+            echo "Endpoint $(account_display_id "$active_num") is unavailable (probe failed)"
+        fi
+    fi
+
+    if [[ "$over_threshold" != true ]]; then
     local current_email
     current_email=$(get_current_account)
 
@@ -2224,7 +2244,7 @@ cmd_rate_check() {
     fi
 
     # Read utilization
-    local usage usage_int
+    local usage
     usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
     usage_int=$(printf "%.0f" "$usage" 2>/dev/null || echo "0")
 
@@ -2237,8 +2257,10 @@ cmd_rate_check() {
     fi
 
     # Above threshold
+    over_threshold=true
     if [[ "$hook_mode" != true ]]; then
         echo "Usage: ${usage_int}% exceeds threshold ${threshold}%"
+    fi
     fi
 
     if [[ "$auto_switch" == true ]]; then
@@ -2274,7 +2296,7 @@ cmd_rate_check() {
                 ($seq | index($active) // 0) as $idx |
                 $seq[($idx + 1) % ($seq | length)]
             ' "$SEQUENCE_FILE")
-            next_email=$(jq -r --arg num "$next_account" '.accounts[$num].email' "$SEQUENCE_FILE")
+            next_email=$(account_display_id "$next_account")
 
             # Perform switch in subshell to catch exit 1 from perform_switch
             if ! (CCS_SILENT=1 perform_switch "$next_account"); then
@@ -2286,30 +2308,29 @@ cmd_rate_check() {
                 exit 2
             fi
 
-            # Invalidate cache and re-fetch for new account
-            rm -f "$cache_file"
-            if fetch_usage_data; then
-                local new_usage new_usage_int
-                new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
-                new_usage_int=$(printf "%.0f" "$new_usage" 2>/dev/null || echo "0")
-
-                if [[ "$new_usage_int" -lt "$threshold" ]]; then
-                    # Successfully switched to an account under the threshold
-                    if [[ "$hook_mode" == true ]]; then
-                        _rate_hook_deny "Rate limit exceeded. Switched to Account-$next_account ($next_email). Please restart Claude Code."
-                        exit 0
-                    fi
-                    echo "Switched to Account-$next_account ($next_email) — usage: ${new_usage_int}%"
-                    handle_restart_after_switch
-                    exit 1
-                fi
+            # Verify the candidate by type: probe endpoints, usage-check oauth.
+            local healthy=false
+            if is_endpoint_account "$next_account"; then
+                if probe_endpoint_health "$next_account"; then healthy=true; fi
             else
-                # Can't verify new account's usage, assume it's OK
+                rm -f "$cache_file"
+                if fetch_usage_data; then
+                    local new_usage new_usage_int
+                    new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
+                    new_usage_int=$(printf "%.0f" "$new_usage" 2>/dev/null || echo "0")
+                    [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
+                else
+                    # Can't verify usage; assume OK (matches prior behavior).
+                    healthy=true
+                fi
+            fi
+
+            if [[ "$healthy" == true ]]; then
                 if [[ "$hook_mode" == true ]]; then
-                    _rate_hook_deny "Rate limit exceeded. Switched to Account-$next_account ($next_email). Please restart Claude Code."
+                    _rate_hook_deny "Switched to Account-$next_account ($next_email). Please restart Claude Code."
                     exit 0
                 fi
-                echo "Switched to Account-$next_account ($next_email) — could not verify usage"
+                echo "Switched to Account-$next_account ($next_email)"
                 handle_restart_after_switch
                 exit 1
             fi
