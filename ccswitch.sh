@@ -1921,6 +1921,69 @@ cmd_exec() {
     CLAUDE_CONFIG_DIR="$dest" exec "${cmd[@]}"
 }
 
+# --- Endpoint health probe ------------------------------------------------
+# Endpoints have no usage API; fallback is reactive. A request is "unhealthy"
+# (trigger fallback) on auth failure, rate/credit limit, server error, or
+# timeout; anything else means the endpoint is reachable and usable.
+
+# Classify an HTTP status: prints "unhealthy" for 401/403/429/5xx/000, else
+# "healthy".
+_classify_probe_code() {
+    local code="$1"
+    case "$code" in
+        401|403|429|000) echo "unhealthy" ;;
+        5??)             echo "unhealthy" ;;
+        *)               echo "healthy" ;;
+    esac
+}
+
+# Issue one request and print the HTTP status code (000 on connection failure).
+# curl prints %{http_code} (000 on connect/timeout failure) AND exits non-zero
+# on failure, so we capture its output and never append a second code. Anything
+# that isn't a clean 3-digit status normalizes to "000".
+# Args: <method> <url> <extra curl args...>
+_probe_http_code() {
+    local method="$1" url="$2"; shift 2
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X "$method" "$url" "$@" 2>/dev/null) || true
+    [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
+    printf '%s' "$code"
+}
+
+# probe_endpoint_health <account_num> -> 0 healthy, 1 unhealthy.
+probe_endpoint_health() {
+    local num="$1"
+    local base token_header model token
+    base=$(account_field "$num" "baseUrl")
+    token_header=$(account_field "$num" "tokenHeader" "api_key")
+    model=$(account_field "$num" "model" "claude-3-5-haiku-20241022")
+    token=$(endpoint_secret "$num")
+    [[ -z "$base" ]] && return 1
+
+    local -a auth=()
+    if [[ "$token_header" == "auth_token" ]]; then
+        auth=(-H "Authorization: Bearer $token")
+    else
+        auth=(-H "x-api-key: $token" -H "anthropic-version: 2023-06-01")
+    fi
+
+    # Step 1: GET /models.
+    local code cls
+    code=$(_probe_http_code GET "${base%/}/models" "${auth[@]}")
+    cls=$(_classify_probe_code "$code")
+    if [[ "$cls" == "unhealthy" ]]; then return 1; fi
+    if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then return 0; fi
+
+    # Step 2: /models was reachable but non-2xx (e.g. 404). Probe /messages.
+    code=$(_probe_http_code POST "${base%/}/messages" \
+        "${auth[@]}" \
+        -H "content-type: application/json" \
+        -H "anthropic-version: 2023-06-01" \
+        -d "{\"model\":\"$model\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+    cls=$(_classify_probe_code "$code")
+    [[ "$cls" == "healthy" ]] && return 0 || return 1
+}
+
 # Fetch usage data from Anthropic OAuth Usage API
 # Writes to /tmp/claude-usage-cache.json with active_account field
 # Returns 0 on success, 1 on failure
