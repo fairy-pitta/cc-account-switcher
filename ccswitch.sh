@@ -325,9 +325,23 @@ read_credentials() {
     esac
 }
 
+# Normalize a credential blob to single-line JSON. macOS `security -w`
+# hex-encodes any value containing newlines, and Claude reads the raw item
+# and cannot decode hex -> 401. Compacting to one line keeps it plain text.
+# Non-JSON input is returned unchanged.
+normalize_credential() {
+    local cred="$1"
+    if printf '%s' "$cred" | jq -e . >/dev/null 2>&1; then
+        printf '%s' "$cred" | jq -c .
+    else
+        printf '%s' "$cred"
+    fi
+}
+
 # Write credentials based on platform
 write_credentials() {
     local credentials="$1"
+    credentials=$(normalize_credential "$credentials")
     local platform
     platform=$(detect_platform)
 
@@ -370,6 +384,7 @@ write_account_credentials() {
     local account_num="$1"
     local email="$2"
     local credentials="$3"
+    credentials=$(normalize_credential "$credentials")
     local platform
     platform=$(detect_platform)
 
