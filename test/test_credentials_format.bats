@@ -76,3 +76,17 @@ FLAT='{"access_token":"AT-flat","refresh_token":"RT-flat"}'
     source_ccswitch_functions
     [ -z "$(cred_expiry_epoch '{"claudeAiOauth":{"expiresAt":null,"accessToken":"not-a-jwt"}}')" ]
 }
+
+@test "test_status_shows_expiry_from_nested_credential" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+    # Future expiry, ~10 days out, in epoch ms
+    local future_ms=$(( ( $(date +%s) + 864000 ) * 1000 ))
+    create_fake_credentials_nested "AT-x" "RT-x" "$future_ms"
+
+    run run_ccswitch status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Expires in"* ]]
+    [[ "$output" != *"Unable to determine"* ]]
+    [[ "$output" != *"No access token"* ]]
+}

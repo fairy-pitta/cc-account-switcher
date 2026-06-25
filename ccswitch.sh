@@ -752,36 +752,23 @@ cmd_status() {
     local creds
     creds=$(read_credentials)
     if [[ -n "$creds" ]]; then
-        # Try to extract access_token or the token field
-        local token
-        token=$(echo "$creds" | jq -r '.access_token // .token // empty' 2>/dev/null)
-        if [[ -n "$token" ]]; then
-            local payload
-            payload=$(decode_jwt_payload "$token")
-            if [[ -n "$payload" ]]; then
-                local exp
-                exp=$(echo "$payload" | jq -r '.exp // empty' 2>/dev/null)
-                if [[ -n "$exp" ]]; then
-                    local now
-                    now=$(date +%s)
-                    local diff=$((exp - now))
-                    if [[ $diff -le 0 ]]; then
-                        echo "Token status:    EXPIRED ($(( -diff / 3600 )) hours ago)"
-                    elif [[ $diff -lt 3600 ]]; then
-                        echo "Token status:    Expires in $((diff / 60)) minutes"
-                    elif [[ $diff -lt 86400 ]]; then
-                        echo "Token status:    Expires in $((diff / 3600)) hours"
-                    else
-                        echo "Token status:    Expires in $((diff / 86400)) days"
-                    fi
-                else
-                    echo "Token status:    Unable to determine expiry (no exp claim)"
-                fi
+        local exp
+        exp=$(cred_expiry_epoch "$creds")
+        if [[ -n "$exp" ]]; then
+            local now diff
+            now=$(date +%s)
+            diff=$((exp - now))
+            if [[ $diff -le 0 ]]; then
+                echo "Token status:    EXPIRED ($(( -diff / 3600 )) hours ago)"
+            elif [[ $diff -lt 3600 ]]; then
+                echo "Token status:    Expires in $((diff / 60)) minutes"
+            elif [[ $diff -lt 86400 ]]; then
+                echo "Token status:    Expires in $((diff / 3600)) hours"
             else
-                echo "Token status:    Unable to decode token (not a JWT)"
+                echo "Token status:    Expires in $((diff / 86400)) days"
             fi
         else
-            echo "Token status:    No access token found in credentials"
+            echo "Token status:    Unable to determine expiry"
         fi
     else
         echo "Token status:    No credentials found"
