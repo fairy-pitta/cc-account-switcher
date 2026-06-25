@@ -104,7 +104,26 @@ ccs to work                      # Switch by profile name
 ccs -n sw                        # Dry-run: preview what would happen
 ccs sw -r                        # Switch and restart Claude Code
 ccs sw --no-restart              # Switch without restart prompt
+ccs to 2 --resume                # Switch to account 2 and resume the conversation
 ```
+
+#### Resume your conversation after switching
+
+`ccs sw` / `ccs to` normally relaunch a fresh Claude Code session. Add `--resume` to
+carry your current conversation across the switch:
+
+```bash
+ccs to 2 --resume
+```
+
+This captures the current directory's most recent session and relaunches with
+`claude --resume <id> --fork-session`, so you continue the same conversation as the new
+account (in a freshly-forked session). If there's no prior conversation for the
+directory, it starts fresh.
+
+> **macOS note:** whether the forked session authenticates under the new account depends
+> on Claude Code's session model. If it can't, the switch still succeeds and you land in
+> a fresh session.
 
 ### Profiles
 

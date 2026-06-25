@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ccs sw --resume` / `ccs to <account> --resume` — switch accounts and relaunch Claude Code fork-resuming the current directory's conversation under the new account (`claude --resume <id> --fork-session`). Falls back to a fresh launch when there's no prior conversation for the directory. On macOS, whether the forked session authenticates under the new account depends on Claude Code's session model — if it can't, the switch still succeeds and you land in a fresh session ([#15](https://github.com/fairy-pitta/cc-account-switcher/issues/15))
+
 ## [0.4.0] - 2026-06-25
 
 ### Added
