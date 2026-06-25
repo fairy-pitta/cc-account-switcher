@@ -510,6 +510,61 @@ account_display_id() {
     fi
 }
 
+# --- Endpoint env block (settings.json) -----------------------------------
+# Switching to an endpoint writes ANTHROPIC_* into the user-global settings env
+# block; switching to oauth removes exactly those keys so stored OAuth creds
+# take over again. settings.json env is applied at Claude Code startup, so a
+# restart is required for an endpoint-crossing switch to take effect.
+
+# Env keys ccs owns. The token var (api key vs auth token) is also in this set
+# so the unused one is always cleared.
+# shellcheck disable=SC2034
+readonly CCS_ENV_KEYS=("ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" "ANTHROPIC_AUTH_TOKEN" "ANTHROPIC_MODEL")
+
+ccs_settings_file() { echo "$HOME/.claude/settings.json"; }
+
+# write_endpoint_env <base_url> <token_header: api_key|auth_token> <token> <model-or-empty>
+write_endpoint_env() {
+    local base_url="$1" token_header="$2" token="$3" model="$4"
+    local file; file="$(ccs_settings_file)"
+    mkdir -p "$(dirname "$file")"
+
+    local base='{}'
+    if [[ -f "$file" ]] && jq -e . "$file" >/dev/null 2>&1; then
+        base=$(cat "$file")
+    fi
+
+    local token_var="ANTHROPIC_API_KEY"
+    [[ "$token_header" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
+
+    local updated
+    updated=$(printf '%s' "$base" | jq \
+        --arg url "$base_url" --arg tvar "$token_var" --arg tok "$token" --arg model "$model" '
+        .env = (.env // {})
+        # Start from a clean ccs-owned slate so a stale token var is dropped.
+        | .env |= (del(.ANTHROPIC_BASE_URL, .ANTHROPIC_API_KEY, .ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_MODEL))
+        | .env.ANTHROPIC_BASE_URL = $url
+        | .env[$tvar] = $tok
+        | (if $model != "" then .env.ANTHROPIC_MODEL = $model else . end)
+    ') || return 1
+
+    write_json "$file" "$updated"
+}
+
+# Remove all ccs-owned env keys (used when switching back to an oauth account).
+clear_endpoint_env() {
+    local file; file="$(ccs_settings_file)"
+    [[ -f "$file" ]] || return 0
+    jq -e . "$file" >/dev/null 2>&1 || return 0
+    local updated
+    updated=$(jq '
+        if (.env | type) == "object"
+        then .env |= del(.ANTHROPIC_BASE_URL, .ANTHROPIC_API_KEY, .ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_MODEL)
+        else . end
+    ' "$file") || return 0
+    write_json "$file" "$updated"
+}
+
 # Initialize sequence.json if it doesn't exist
 init_sequence_file() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
