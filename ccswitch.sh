@@ -338,6 +338,55 @@ normalize_credential() {
     fi
 }
 
+# --- Credential accessors -------------------------------------------------
+# Claude Code 2.1.x stores nested camelCase: {claudeAiOauth:{accessToken,
+# refreshToken, expiresAt(ms)}}. Older/Linux creds may be flat snake_case
+# {access_token, refresh_token}. These accessors read/write either shape so
+# the rest of the tool is format-agnostic.
+
+cred_access_token() {
+    printf '%s' "$1" | jq -r '.claudeAiOauth.accessToken // .access_token // .token // empty' 2>/dev/null
+}
+
+cred_refresh_token() {
+    printf '%s' "$1" | jq -r '.claudeAiOauth.refreshToken // .refresh_token // empty' 2>/dev/null
+}
+
+# Echo the token expiry as epoch SECONDS, or empty if undeterminable.
+# Prefers nested expiresAt (epoch ms); else decodes a flat JWT access token.
+cred_expiry_epoch() {
+    local cred="$1" ms token payload exp
+    ms=$(printf '%s' "$cred" | jq -r '.claudeAiOauth.expiresAt // empty' 2>/dev/null)
+    if [[ "$ms" =~ ^[0-9]+$ ]]; then
+        echo $(( ms / 1000 ))
+        return
+    fi
+    token=$(cred_access_token "$cred")
+    if [[ -n "$token" ]]; then
+        payload=$(decode_jwt_payload "$token")
+        exp=$(printf '%s' "$payload" | jq -r '.exp // empty' 2>/dev/null)
+        if [[ "$exp" =~ ^[0-9]+$ ]]; then
+            echo "$exp"
+            return
+        fi
+    fi
+    echo ""
+}
+
+# Return the credential JSON with access/refresh tokens replaced, written to
+# whichever shape the input used, normalized to single-line.
+cred_set_tokens() {
+    local cred="$1" access="$2" refresh="$3" out
+    if printf '%s' "$cred" | jq -e '.claudeAiOauth' >/dev/null 2>&1; then
+        out=$(printf '%s' "$cred" | jq --arg a "$access" --arg r "$refresh" \
+            '.claudeAiOauth.accessToken = $a | .claudeAiOauth.refreshToken = $r' 2>/dev/null)
+    else
+        out=$(printf '%s' "$cred" | jq --arg a "$access" --arg r "$refresh" \
+            '.access_token = $a | .refresh_token = $r' 2>/dev/null)
+    fi
+    normalize_credential "$out"
+}
+
 # Write credentials based on platform
 write_credentials() {
     local credentials="$1"

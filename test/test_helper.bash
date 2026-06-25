@@ -186,6 +186,17 @@ create_fake_credentials() {
     security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$creds"
 }
 
+# Helper: write a NESTED camelCase credential (real Claude Code 2.1.x shape)
+# to the global keychain item. expiresAt is epoch MILLISECONDS.
+# Usage: create_fake_credentials_nested <access> <refresh> <expires_at_ms>
+create_fake_credentials_nested() {
+    local access="${1:-at-nested}" refresh="${2:-rt-nested}" exp_ms="${3:-9999999999000}"
+    local creds
+    creds=$(jq -nc --arg a "$access" --arg r "$refresh" --argjson e "$exp_ms" \
+        '{claudeAiOauth:{accessToken:$a, refreshToken:$r, expiresAt:$e, scopes:["user:inference"]}}')
+    security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$creds"
+}
+
 # Helper: set up a complete fake account (config + credentials)
 setup_fake_account() {
     local email="${1:-test@example.com}"
