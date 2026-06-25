@@ -25,6 +25,8 @@ readonly DEFAULT_CACHE_TTL=60
 # Global flags (set during argument parsing)
 DRY_RUN=false
 RESTART_FLAG=""  # "", "restart", or "no-restart"
+RESUME_AFTER=false  # true when --resume: fork-resume the conversation after switching
+RESUME_SID=""       # captured lastSessionId for $PWD, set before the switch
 # Allow running as root. Defaults from CCSWITCH_ALLOW_ROOT (1/true to enable),
 # can also be set with the --allow-root flag.
 if [[ "${CCSWITCH_ALLOW_ROOT:-}" == "1" || "${CCSWITCH_ALLOW_ROOT:-}" == "true" ]]; then
@@ -572,6 +574,26 @@ capture_resume_session_id() {
     jq -r --arg c "$PWD" '.projects[$c].lastSessionId // empty' "$cfg" 2>/dev/null || true
 }
 
+# Foreground relaunch that fork-resumes the captured conversation under the
+# now-active account. Falls back to a fresh launch when there is no session id.
+restart_claude_code_resume() {
+    local sid="$1" bin
+    bin=$(command -v claude 2>/dev/null || echo "")
+    if [[ -z "$bin" ]]; then
+        echo "Switched. 'claude' not found in PATH — resume manually:"
+        echo "  $(build_resume_command claude "$sid")"
+        return 0
+    fi
+    kill_claude_processes
+    if [[ -n "$sid" ]]; then
+        echo "Resuming conversation under the new account (forked session)..."
+        exec "$bin" --resume "$sid" --fork-session
+    else
+        echo "No previous conversation found for this directory — starting fresh."
+        exec "$bin"
+    fi
+}
+
 # Restart Claude Code
 restart_claude_code() {
     echo "Restarting Claude Code..."
@@ -587,6 +609,10 @@ restart_claude_code() {
 
 # Handle restart logic after a switch
 handle_restart_after_switch() {
+    if [[ "$RESUME_AFTER" == true ]]; then
+        restart_claude_code_resume "$RESUME_SID"
+        return
+    fi
     case "$RESTART_FLAG" in
         restart)
             restart_claude_code
@@ -1295,6 +1321,12 @@ perform_switch() {
     target_email=$(jq -r --arg num "$target_account" '.accounts[$num].email' "$SEQUENCE_FILE")
     current_email=$(get_current_account)
 
+    # Capture the conversation pointer from the OUTGOING .claude.json (before the
+    # swap) so we can fork-resume it under the new account.
+    if [[ "$RESUME_AFTER" == true ]]; then
+        RESUME_SID=$(capture_resume_session_id)
+    fi
+
     # Dry-run mode: show what would happen and return
     if [[ "$DRY_RUN" == true ]]; then
         echo "[DRY RUN] Would switch from Account-$current_account ($current_email) to Account-$target_account ($target_email)"
@@ -1303,6 +1335,9 @@ perform_switch() {
         echo "  2. Restore credentials and config from Account-$target_account backup"
         echo "  3. Update active account in sequence.json"
         echo "  4. Update usage statistics"
+        if [[ "$RESUME_AFTER" == true ]]; then
+            echo "  4. Relaunch: $(build_resume_command claude "$RESUME_SID")"
+        fi
         return
     fi
 
@@ -2273,6 +2308,10 @@ main() {
                 ;;
             --restart|-r)
                 RESTART_FLAG="restart"
+                shift
+                ;;
+            --resume)
+                RESUME_AFTER=true
                 shift
                 ;;
             --no-restart)
