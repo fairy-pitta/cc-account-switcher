@@ -1682,7 +1682,7 @@ fetch_usage_data() {
         return 1
     fi
 
-    access_token=$(echo "$creds" | jq -r '.access_token // empty' 2>/dev/null)
+    access_token=$(cred_access_token "$creds")
     if [[ -z "$access_token" ]]; then
         return 1
     fi
@@ -1701,7 +1701,7 @@ fetch_usage_data() {
     # Handle token refresh on 401
     if [[ "$http_code" == "401" ]]; then
         local refresh_token client_id
-        refresh_token=$(echo "$creds" | jq -r '.refresh_token // empty' 2>/dev/null)
+        refresh_token=$(cred_refresh_token "$creds")
         client_id="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
         if [[ -z "$refresh_token" ]]; then
@@ -1732,10 +1732,7 @@ fetch_usage_data() {
             return 1
         fi
 
-        updated_creds=$(echo "$creds" | jq \
-            --arg at "$new_access" \
-            --arg rt "${new_refresh:-$refresh_token}" \
-            '.access_token = $at | .refresh_token = $rt' 2>/dev/null)
+        updated_creds=$(cred_set_tokens "$creds" "$new_access" "${new_refresh:-$refresh_token}")
         write_credentials "$updated_creds"
 
         # Retry the usage API with new token
