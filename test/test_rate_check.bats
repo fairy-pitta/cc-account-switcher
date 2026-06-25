@@ -9,6 +9,7 @@ setup() {
 
 teardown() {
     rm -f "$CACHE_FILE"
+    rm -f /tmp/ccs-curl-count
     teardown_test_env
 }
 
@@ -297,4 +298,92 @@ MOCK_EOF
     [ "$status" -eq 0 ]
     # Should output deny JSON since there's only one account
     echo "$output" | jq . >/dev/null 2>&1
+}
+
+@test "test_fetch_usage_data_reads_nested_credential" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+    create_fake_credentials_nested "AT-1" "RT-1" 9999999999000
+
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+echo '{"five_hour":{"utilization":42,"limit":100,"used":42}}'
+echo "200"
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+
+    source_ccswitch_functions
+    run fetch_usage_data
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.five_hour.utilization' /tmp/claude-usage-cache.json)" = "42" ]
+}
+
+@test "test_fetch_usage_data_refresh_writes_back_nested_shape" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+    create_fake_credentials_nested "OLD-AT" "OLD-RT" 9999999999000
+
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+n_file=/tmp/ccs-curl-count
+n=$(cat "$n_file" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$n_file"
+if [ "$n" -eq 1 ]; then
+    echo '{}'; echo "401"
+elif [ "$n" -eq 2 ]; then
+    echo '{"access_token":"NEW-AT","refresh_token":"NEW-RT"}'; echo "200"
+else
+    echo '{"five_hour":{"utilization":10,"limit":100,"used":10}}'; echo "200"
+fi
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+    rm -f /tmp/ccs-curl-count
+
+    source_ccswitch_functions
+    run fetch_usage_data
+    [ "$status" -eq 0 ]
+    local stored
+    stored=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+    [ "$(printf '%s' "$stored" | jq -r '.claudeAiOauth.accessToken')" = "NEW-AT" ]
+    [ "$(printf '%s' "$stored" | jq -r '.claudeAiOauth.refreshToken')" = "NEW-RT" ]
+    [ "$(printf '%s' "$stored" | wc -l | tr -d ' ')" -eq 0 ]
+}
+
+@test "test_fetch_usage_data_revoked_refresh_prints_relogin_hint" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+    create_fake_credentials_nested "AT-x" "RT-x" 9999999999000
+
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+n_file=/tmp/ccs-curl-count
+n=$(cat "$n_file" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$n_file"
+if [ "$n" -eq 1 ]; then echo '{}'; echo "401"; else echo '{}'; echo "403"; fi
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+    rm -f /tmp/ccs-curl-count
+
+    source_ccswitch_functions
+    run fetch_usage_data
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"needs re-login"* ]]
+    [[ "$output" == *"claude /login"* ]]
+}
+
+@test "test_rate_check_hook_mode_revoked_refresh_fails_open" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+    create_fake_credentials_nested "AT-x" "RT-x" 9999999999000
+    rm -f /tmp/claude-usage-cache.json
+
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+n_file=/tmp/ccs-curl-count
+n=$(cat "$n_file" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$n_file"
+if [ "$n" -eq 1 ]; then echo '{}'; echo "401"; else echo '{}'; echo "403"; fi
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+    rm -f /tmp/ccs-curl-count
+
+    run run_ccswitch rate-check --hook-mode --threshold 80
+    [ "$status" -eq 0 ]
 }

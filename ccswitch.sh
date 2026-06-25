@@ -338,6 +338,58 @@ normalize_credential() {
     fi
 }
 
+# --- Credential accessors -------------------------------------------------
+# Claude Code 2.1.x stores nested camelCase: {claudeAiOauth:{accessToken,
+# refreshToken, expiresAt(ms)}}. Older/Linux creds may be flat snake_case
+# {access_token, refresh_token}. These accessors read/write either shape so
+# the rest of the tool is format-agnostic.
+
+cred_access_token() {
+    printf '%s' "$1" | jq -r '.claudeAiOauth.accessToken // .access_token // .token // empty' 2>/dev/null
+}
+
+cred_refresh_token() {
+    printf '%s' "$1" | jq -r '.claudeAiOauth.refreshToken // .refresh_token // empty' 2>/dev/null
+}
+
+# Echo the token expiry as epoch SECONDS, or empty if undeterminable.
+# Prefers nested expiresAt (epoch ms); else decodes a flat JWT access token.
+cred_expiry_epoch() {
+    local cred="$1" ms token payload exp
+    ms=$(printf '%s' "$cred" | jq -r '.claudeAiOauth.expiresAt // empty' 2>/dev/null)
+    if [[ "$ms" =~ ^[0-9]+$ ]]; then
+        echo $(( ms / 1000 ))
+        return
+    fi
+    token=$(cred_access_token "$cred")
+    if [[ -n "$token" ]]; then
+        payload=$(decode_jwt_payload "$token")
+        exp=$(printf '%s' "$payload" | jq -r '.exp // empty' 2>/dev/null)
+        if [[ "$exp" =~ ^[0-9]+$ ]]; then
+            echo "$exp"
+            return
+        fi
+    fi
+    echo ""
+}
+
+# Return the credential JSON with access/refresh tokens replaced, written to
+# whichever shape the input used, normalized to single-line.
+cred_set_tokens() {
+    local cred="$1" access="$2" refresh="$3" out
+    if ! printf '%s' "$cred" | jq -e . >/dev/null 2>&1; then
+        return 1   # not valid JSON; refuse to write back garbage
+    fi
+    if printf '%s' "$cred" | jq -e '.claudeAiOauth' >/dev/null 2>&1; then
+        out=$(printf '%s' "$cred" | jq --arg a "$access" --arg r "$refresh" \
+            '.claudeAiOauth.accessToken = $a | .claudeAiOauth.refreshToken = $r' 2>/dev/null)
+    else
+        out=$(printf '%s' "$cred" | jq --arg a "$access" --arg r "$refresh" \
+            '.access_token = $a | .refresh_token = $r' 2>/dev/null)
+    fi
+    normalize_credential "$out"
+}
+
 # Write credentials based on platform
 write_credentials() {
     local credentials="$1"
@@ -700,36 +752,23 @@ cmd_status() {
     local creds
     creds=$(read_credentials)
     if [[ -n "$creds" ]]; then
-        # Try to extract access_token or the token field
-        local token
-        token=$(echo "$creds" | jq -r '.access_token // .token // empty' 2>/dev/null)
-        if [[ -n "$token" ]]; then
-            local payload
-            payload=$(decode_jwt_payload "$token")
-            if [[ -n "$payload" ]]; then
-                local exp
-                exp=$(echo "$payload" | jq -r '.exp // empty' 2>/dev/null)
-                if [[ -n "$exp" ]]; then
-                    local now
-                    now=$(date +%s)
-                    local diff=$((exp - now))
-                    if [[ $diff -le 0 ]]; then
-                        echo "Token status:    EXPIRED ($(( -diff / 3600 )) hours ago)"
-                    elif [[ $diff -lt 3600 ]]; then
-                        echo "Token status:    Expires in $((diff / 60)) minutes"
-                    elif [[ $diff -lt 86400 ]]; then
-                        echo "Token status:    Expires in $((diff / 3600)) hours"
-                    else
-                        echo "Token status:    Expires in $((diff / 86400)) days"
-                    fi
-                else
-                    echo "Token status:    Unable to determine expiry (no exp claim)"
-                fi
+        local exp
+        exp=$(cred_expiry_epoch "$creds")
+        if [[ -n "$exp" ]]; then
+            local now diff
+            now=$(date +%s)
+            diff=$((exp - now))
+            if [[ $diff -le 0 ]]; then
+                echo "Token status:    EXPIRED ($(( -diff / 3600 )) hours ago)"
+            elif [[ $diff -lt 3600 ]]; then
+                echo "Token status:    Expires in $((diff / 60)) minutes"
+            elif [[ $diff -lt 86400 ]]; then
+                echo "Token status:    Expires in $((diff / 3600)) hours"
             else
-                echo "Token status:    Unable to decode token (not a JWT)"
+                echo "Token status:    Expires in $((diff / 86400)) days"
             fi
         else
-            echo "Token status:    No access token found in credentials"
+            echo "Token status:    Unable to determine expiry"
         fi
     else
         echo "Token status:    No credentials found"
@@ -1630,7 +1669,7 @@ fetch_usage_data() {
         return 1
     fi
 
-    access_token=$(echo "$creds" | jq -r '.access_token // empty' 2>/dev/null)
+    access_token=$(cred_access_token "$creds")
     if [[ -z "$access_token" ]]; then
         return 1
     fi
@@ -1649,7 +1688,7 @@ fetch_usage_data() {
     # Handle token refresh on 401
     if [[ "$http_code" == "401" ]]; then
         local refresh_token client_id
-        refresh_token=$(echo "$creds" | jq -r '.refresh_token // empty' 2>/dev/null)
+        refresh_token=$(cred_refresh_token "$creds")
         client_id="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
         if [[ -z "$refresh_token" ]]; then
@@ -1668,6 +1707,7 @@ fetch_usage_data() {
         refresh_body=$(echo "$refresh_response" | sed '$d')
 
         if [[ "$refresh_code" != "200" ]]; then
+            echo "ccs: account ${current_email} needs re-login — run: claude /login" >&2
             return 1
         fi
 
@@ -1680,10 +1720,12 @@ fetch_usage_data() {
             return 1
         fi
 
-        updated_creds=$(echo "$creds" | jq \
-            --arg at "$new_access" \
-            --arg rt "${new_refresh:-$refresh_token}" \
-            '.access_token = $at | .refresh_token = $rt' 2>/dev/null)
+        updated_creds=$(cred_set_tokens "$creds" "$new_access" "${new_refresh:-$refresh_token}")
+        # Never overwrite the store with an empty credential (e.g. if the
+        # rewrite somehow failed) — that would wipe the active login.
+        if [[ -z "$updated_creds" ]]; then
+            return 1
+        fi
         write_credentials "$updated_creds"
 
         # Retry the usage API with new token
