@@ -1336,7 +1336,7 @@ perform_switch() {
         echo "  3. Update active account in sequence.json"
         echo "  4. Update usage statistics"
         if [[ "$RESUME_AFTER" == true ]]; then
-            echo "  4. Relaunch: $(build_resume_command claude "$RESUME_SID")"
+            echo "  5. Relaunch: $(build_resume_command claude "$RESUME_SID")"
         fi
         return
     fi
