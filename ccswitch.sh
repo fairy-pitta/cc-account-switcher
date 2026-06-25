@@ -516,6 +516,22 @@ account_display_id() {
     fi
 }
 
+# Which account is actually live. Endpoint accounts leave .claude.json's email
+# untouched, so when activeAccountNumber points at an endpoint we trust it;
+# otherwise we map the live oauth email to its slot (handles external relogin).
+effective_active_account_num() {
+    local an
+    an=$(jq -r '.activeAccountNumber // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    if [[ -n "$an" ]] && is_endpoint_account "$an"; then
+        echo "$an"
+        return
+    fi
+    local email
+    email=$(get_current_account)
+    jq -r --arg e "$email" '(.accounts | to_entries[] | select(.value.email == $e) | .key) // empty' \
+        "$SEQUENCE_FILE" 2>/dev/null || true
+}
+
 # --- Endpoint env block (settings.json) -----------------------------------
 # Switching to an endpoint writes ANTHROPIC_* into the user-global settings env
 # block; switching to oauth removes exactly those keys so stored OAuth creds
@@ -1411,15 +1427,9 @@ cmd_list() {
         exit 0
     fi
 
-    # Get current active account from .claude.json
-    local current_email
-    current_email=$(get_current_account)
-
-    # Find which account number corresponds to the current email
+    # Find which account number is active (endpoint-aware).
     local active_account_num=""
-    if [[ "$current_email" != "none" ]]; then
-        active_account_num=$(jq -r --arg email "$current_email" '.accounts | to_entries[] | select(.value.email == $email) | .key' "$SEQUENCE_FILE" 2>/dev/null)
-    fi
+    active_account_num=$(effective_active_account_num)
 
     echo "Accounts:"
     jq -r --arg active "$active_account_num" '
@@ -1527,7 +1537,7 @@ perform_switch() {
     # Get current and target account info
     local current_account target_email current_email
     current_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    target_email=$(jq -r --arg num "$target_account" '.accounts[$num].email' "$SEQUENCE_FILE")
+    target_email=$(jq -r --arg num "$target_account" '.accounts[$num].label // .accounts[$num].email' "$SEQUENCE_FILE")
     current_email=$(get_current_account)
 
     # Capture the conversation pointer from the OUTGOING .claude.json (before the
@@ -1569,27 +1579,34 @@ perform_switch() {
     # The email in .claude.json is the source of truth for whose credential is
     # live; trusting a stale number would back the live credential up under the
     # wrong slot and restore a stale one, destroying the working session.
-    local real_current_account
-    real_current_account=$(jq -r --arg email "$current_email" '
-        (.accounts | to_entries[] | select(.value.email == $email) | .key) // empty
-    ' "$SEQUENCE_FILE" 2>/dev/null)
+    # When the live account is an endpoint, activeAccountNumber is authoritative
+    # (no oauth email to reconcile against). Only reconcile for oauth.
+    local current_is_endpoint=false
+    if is_endpoint_account "$current_account"; then
+        current_is_endpoint=true
+        current_email=$(account_display_id "$current_account")
+    else
+        local real_current_account
+        real_current_account=$(jq -r --arg email "$current_email" '
+            (.accounts | to_entries[] | select(.value.email == $email) | .key) // empty
+        ' "$SEQUENCE_FILE" 2>/dev/null)
 
-    if [[ -z "$real_current_account" ]]; then
-        release_switch_lock
-        if [[ "${CCS_SILENT:-}" != "1" ]]; then
-            echo "Error: the active account ($current_email) is not managed by ccs."
-            echo "Run 'ccs add' before switching so its credentials aren't lost."
-        else
-            echo "Error: active account ($current_email) unmanaged; skipping switch." >&2
+        if [[ -z "$real_current_account" ]]; then
+            release_switch_lock
+            if [[ "${CCS_SILENT:-}" != "1" ]]; then
+                echo "Error: the active account ($current_email) is not managed by ccs."
+                echo "Run 'ccs add' before switching so its credentials aren't lost."
+            else
+                echo "Error: active account ($current_email) unmanaged; skipping switch." >&2
+            fi
+            exit 1
         fi
-        exit 1
-    fi
-
-    if [[ "$real_current_account" != "$current_account" ]]; then
-        if [[ "${CCS_SILENT:-}" != "1" ]]; then
-            echo "Note: corrected active account $current_account -> $real_current_account (was out of sync)."
+        if [[ "$real_current_account" != "$current_account" ]]; then
+            if [[ "${CCS_SILENT:-}" != "1" ]]; then
+                echo "Note: corrected active account $current_account -> $real_current_account (was out of sync)."
+            fi
+            current_account="$real_current_account"
         fi
-        current_account="$real_current_account"
     fi
 
     # No-op guard: if we're already on the target (e.g. a concurrent switch beat
@@ -1605,13 +1622,14 @@ perform_switch() {
         return
     fi
 
-    # Save pre-switch state for rollback
-    local rollback_creds rollback_config rollback_sequence
+    # Save pre-switch state for rollback (settings.json included for env restore).
+    local rollback_creds rollback_config rollback_sequence rollback_settings
     rollback_creds=$(read_credentials)
     rollback_config=$(cat "$(get_claude_config_path)")
     rollback_sequence=$(cat "$SEQUENCE_FILE")
+    rollback_settings=""
+    [[ -f "$(ccs_settings_file)" ]] && rollback_settings=$(cat "$(ccs_settings_file)")
 
-    # Rollback function
     rollback() {
         if [[ "${CCS_SILENT:-}" != "1" ]]; then
             echo ""
@@ -1622,6 +1640,13 @@ perform_switch() {
         write_credentials "$rollback_creds" 2>/dev/null || true
         write_json "$(get_claude_config_path)" "$rollback_config" 2>/dev/null || true
         write_json "$SEQUENCE_FILE" "$rollback_sequence" 2>/dev/null || true
+        if [[ -n "$rollback_settings" ]]; then
+            write_json "$(ccs_settings_file)" "$rollback_settings" 2>/dev/null || true
+        else
+            # No settings.json existed pre-switch: strip any endpoint env we may
+            # have written so a failed switch can't leave an orphaned env block.
+            clear_endpoint_env 2>/dev/null || true
+        fi
         release_switch_lock
         if [[ "${CCS_SILENT:-}" != "1" ]]; then
             echo "Rollback complete. Account-$current_account ($current_email) is still active."
@@ -1630,57 +1655,64 @@ perform_switch() {
         fi
     }
 
-    # Step 1: Backup current account
-    local current_creds current_config
-    current_creds=$(read_credentials)
-    current_config=$(cat "$(get_claude_config_path)")
-
-    if ! write_account_credentials "$current_account" "$current_email" "$current_creds"; then
-        rollback
-        exit 1
-    fi
-    if ! write_account_config "$current_account" "$current_email" "$current_config"; then
-        rollback
-        exit 1
-    fi
-
-    # Step 2: Retrieve target account
-    local target_creds target_config
-    target_creds=$(read_account_credentials "$target_account" "$target_email")
-    target_config=$(read_account_config "$target_account" "$target_email")
-
-    if [[ -z "$target_creds" || -z "$target_config" ]]; then
-        echo "Error: Missing backup data for Account-$target_account"
-        rollback
-        exit 1
+    # Step 1: Back up the OUTGOING account. Endpoint accounts have no live oauth
+    # state to capture (their secret/metadata are static), so skip the backup.
+    if [[ "$current_is_endpoint" != true ]]; then
+        local current_creds current_config
+        current_creds=$(read_credentials)
+        current_config=$(cat "$(get_claude_config_path)")
+        if ! write_account_credentials "$current_account" "$current_email" "$current_creds"; then
+            rollback; exit 1
+        fi
+        if ! write_account_config "$current_account" "$current_email" "$current_config"; then
+            rollback; exit 1
+        fi
     fi
 
-    # Step 3: Activate target account
-    if ! write_credentials "$target_creds"; then
-        rollback
-        exit 1
-    fi
-
-    # Extract oauthAccount from backup and validate
-    local oauth_section
-    oauth_section=$(echo "$target_config" | jq '.oauthAccount' 2>/dev/null)
-    if [[ -z "$oauth_section" || "$oauth_section" == "null" ]]; then
-        echo "Error: Invalid oauthAccount in backup"
-        rollback
-        exit 1
-    fi
-
-    # Merge with current config and validate
-    local merged_config
-    if ! merged_config=$(jq --argjson oauth "$oauth_section" '.oauthAccount = $oauth' "$(get_claude_config_path)" 2>/dev/null); then
-        echo "Error: Failed to merge config"
-        rollback
-        exit 1
-    fi
-
-    if ! write_json "$(get_claude_config_path)" "$merged_config"; then
-        rollback
-        exit 1
+    # Step 2+3: Activate the target, branched on its auth type.
+    if is_endpoint_account "$target_account"; then
+        # Endpoint target: drive Claude Code via the settings env block. Leave
+        # credentials / .claude.json untouched (the dormant oauth login stays).
+        local ep_base ep_th ep_model ep_token
+        ep_base=$(account_field "$target_account" "baseUrl")
+        ep_th=$(account_field "$target_account" "tokenHeader" "api_key")
+        ep_model=$(account_field "$target_account" "model")
+        ep_token=$(endpoint_secret "$target_account")
+        if [[ -z "$ep_base" || -z "$ep_token" ]]; then
+            echo "Error: Missing endpoint config/secret for Account-$target_account"
+            rollback; exit 1
+        fi
+        if ! write_endpoint_env "$ep_base" "$ep_th" "$ep_token" "$ep_model"; then
+            rollback; exit 1
+        fi
+    else
+        # OAuth target: restore credentials + oauthAccount, and remove any
+        # endpoint env so the OAuth login takes over again.
+        local target_creds target_config
+        target_creds=$(read_account_credentials "$target_account" "$target_email")
+        target_config=$(read_account_config "$target_account" "$target_email")
+        if [[ -z "$target_creds" || -z "$target_config" ]]; then
+            echo "Error: Missing backup data for Account-$target_account"
+            rollback; exit 1
+        fi
+        if ! write_credentials "$target_creds"; then
+            rollback; exit 1
+        fi
+        local oauth_section
+        oauth_section=$(echo "$target_config" | jq '.oauthAccount' 2>/dev/null)
+        if [[ -z "$oauth_section" || "$oauth_section" == "null" ]]; then
+            echo "Error: Invalid oauthAccount in backup"
+            rollback; exit 1
+        fi
+        local merged_config
+        if ! merged_config=$(jq --argjson oauth "$oauth_section" '.oauthAccount = $oauth' "$(get_claude_config_path)" 2>/dev/null); then
+            echo "Error: Failed to merge config"
+            rollback; exit 1
+        fi
+        if ! write_json "$(get_claude_config_path)" "$merged_config"; then
+            rollback; exit 1
+        fi
+        clear_endpoint_env
     fi
 
     # Step 4: Update state and usage statistics
@@ -1739,6 +1771,9 @@ perform_switch() {
         # Display updated account list
         cmd_list
         echo ""
+        if is_endpoint_account "$target_account" || [[ "$current_is_endpoint" == true ]]; then
+            echo "Note: this switch changes settings.json env — restart Claude Code for it to take effect."
+        fi
 
         # Handle restart
         handle_restart_after_switch
