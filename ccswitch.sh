@@ -478,6 +478,38 @@ write_account_config() {
     chmod 600 "$config_file"
 }
 
+# --- Account type helpers -------------------------------------------------
+# Endpoint accounts (authType:"endpoint") carry a base URL + API key/token in
+# the env block instead of OAuth credentials. authType is absent on legacy
+# records, which therefore read as "oauth".
+
+account_auth_type() {
+    local num="$1"
+    jq -r --arg n "$num" '.accounts[$n].authType // "oauth"' "$SEQUENCE_FILE" 2>/dev/null || echo "oauth"
+}
+
+is_endpoint_account() {
+    [[ "$(account_auth_type "$1")" == "endpoint" ]]
+}
+
+# Read one field from an account record, with a default when absent/null.
+account_field() {
+    local num="$1" field="$2" default="${3:-}"
+    local v
+    v=$(jq -r --arg n "$num" --arg f "$field" '.accounts[$n][$f] // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    if [[ -z "$v" ]]; then echo "$default"; else echo "$v"; fi
+}
+
+# Human identifier: label for endpoints, email for oauth accounts.
+account_display_id() {
+    local num="$1"
+    if is_endpoint_account "$num"; then
+        account_field "$num" "label"
+    else
+        account_field "$num" "email"
+    fi
+}
+
 # Initialize sequence.json if it doesn't exist
 init_sequence_file() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
