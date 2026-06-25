@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-25
+
 ### Added
 
 - Rate-limit auto-switch now works in headless `claude -p` runs: the PreToolUse hook refreshes the usage cache on demand (TTL-aware) instead of silently no-op'ing when no statusline is keeping it warm ([#20](https://github.com/fairy-pitta/cc-account-switcher/issues/20))
