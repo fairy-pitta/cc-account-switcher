@@ -26,6 +26,7 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 - **Dry-run mode** — Preview what a switch would do without making changes
 - **Rollback** — Automatic rollback if a switch fails mid-way
 - **Rate limit auto-switch** — Automatically switch accounts when usage limits are hit, via Claude Code hooks
+- **Custom endpoints** — Add `ANTHROPIC_BASE_URL` + API key/token providers (OpenRouter, gateways, proxies, self-hosted) as switchable accounts via `ccs add-endpoint`
 - **Conversation handoff** — `--resume` carries your current conversation across a switch (fork-resume)
 - **Parallel isolation** — Run commands as a specific account in their own `CLAUDE_CONFIG_DIR` (`ccs exec` / `config-dir`; Linux/WSL)
 - **Diagnostics** — Health checks, status, and per-account usage statistics
@@ -126,6 +127,29 @@ directory, it starts fresh.
 > **macOS note:** whether the forked session authenticates under the new account depends
 > on Claude Code's session model. If it can't, the switch still succeeds and you land in
 > a fresh session.
+
+### Custom endpoints
+
+Add an Anthropic-compatible endpoint as a switchable account:
+
+```bash
+# API-key (x-api-key) provider, key read from a prompt (not shell history)
+ccs add-endpoint openrouter --base-url https://openrouter.ai/api/v1 --token-header api_key
+
+# Bearer-token provider, key piped in
+echo "$MY_TOKEN" | ccs add-endpoint gateway --base-url https://gw.corp/v1 --token-header auth_token --key-stdin --model claude-3-5-sonnet
+
+ccs to openrouter        # switch (writes ANTHROPIC_* into ~/.claude/settings.json env)
+ccs to 1                 # switch back to an OAuth account (removes those env vars)
+```
+
+Switching to/from an endpoint changes Claude Code's `settings.json` `env`, which
+is read at startup — **restart Claude Code** (or use `-r` / `--resume`) for the
+change to take effect.
+
+Endpoints also participate in rate-limit auto-switch: because they have no usage
+API, `ccs` probes the endpoint (`/models`, then `/messages`) and falls back to the
+next account when it returns auth, rate-limit, server, or timeout errors.
 
 ### Profiles
 

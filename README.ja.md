@@ -26,6 +26,7 @@ macOS・Linux・WSL で複数の Claude Code アカウントを簡単に管理�
 - **ドライラン** — 実際に切り替えずに動作をプレビュー
 - **ロールバック** — 切り替え途中で失敗した場合は自動でロールバック
 - **レート制限自動切り替え** — 使用量が上限に達したら自動的にアカウントを切り替え（Claude Code フック連携）
+- **カスタムエンドポイント** — `ANTHROPIC_BASE_URL` と API キー／トークン型プロバイダー（OpenRouter・ゲートウェイ・プロキシ・セルフホスト）を `ccs add-endpoint` で切り替え可能なアカウントとして追加
 - **会話の引き継ぎ** — `--resume` で、切り替え後も現在の会話をそのまま継続（fork-resume）
 - **並列分離** — 指定アカウントを専用の `CLAUDE_CONFIG_DIR` で実行（`ccs exec` / `config-dir`、Linux/WSL）
 - **診断機能** — ヘルスチェック、ステータス確認、アカウントごとの使用統計
@@ -125,6 +126,30 @@ ccs to 2 --resume
 > **macOS の注意：** fork したセッションが新アカウントで認証できるかは Claude Code の
 > セッション仕様に依存します。認証できない場合でも切り替え自体は成功し、新規セッション
 > で起動します。
+
+### カスタムエンドポイント
+
+Anthropic 互換エンドポイントを切り替え可能なアカウントとして追加できます：
+
+```bash
+# API キー（x-api-key）型プロバイダー、キーはプロンプト入力（シェル履歴に残らない）
+ccs add-endpoint openrouter --base-url https://openrouter.ai/api/v1 --token-header api_key
+
+# Bearer トークン型プロバイダー、キーをパイプで渡す
+echo "$MY_TOKEN" | ccs add-endpoint gateway --base-url https://gw.corp/v1 --token-header auth_token --key-stdin --model claude-3-5-sonnet
+
+ccs to openrouter        # 切り替え（~/.claude/settings.json の env に ANTHROPIC_* を書き込む）
+ccs to 1                 # OAuth アカウントに戻す（env から ANTHROPIC_* を削除）
+```
+
+エンドポイントへの切り替えは Claude Code の `settings.json` の `env` を変更します。
+この設定は起動時に読み込まれるため、変更を反映するには **Claude Code を再起動**
+してください（または `-r` / `--resume` を使用）。
+
+エンドポイントはレート制限自動切り替えにも参加します。Usage API が存在しないため、
+`ccs` はエンドポイントに直接プローブ（`/models`、次に `/messages`）を送り、認証
+エラー・レート制限・サーバーエラー・タイムアウトが返った場合に次のアカウントへ
+フォールバックします。
 
 ### プロフィール
 
