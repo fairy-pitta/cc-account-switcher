@@ -26,6 +26,8 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 - **Dry-run mode** — Preview what a switch would do without making changes
 - **Rollback** — Automatic rollback if a switch fails mid-way
 - **Rate limit auto-switch** — Automatically switch accounts when usage limits are hit, via Claude Code hooks
+- **Conversation handoff** — `--resume` carries your current conversation across a switch (fork-resume)
+- **Parallel isolation** — Run commands as a specific account in their own `CLAUDE_CONFIG_DIR` (`ccs exec` / `config-dir`; Linux/WSL)
 - **Diagnostics** — Health checks, status, and per-account usage statistics
 - **Cross-platform** — Works on macOS, Linux, and WSL
 - **Secure storage** — Uses system keychain (macOS) or protected files (Linux/WSL)
