@@ -1721,6 +1721,11 @@ fetch_usage_data() {
         fi
 
         updated_creds=$(cred_set_tokens "$creds" "$new_access" "${new_refresh:-$refresh_token}")
+        # Never overwrite the store with an empty credential (e.g. if the
+        # rewrite somehow failed) — that would wipe the active login.
+        if [[ -z "$updated_creds" ]]; then
+            return 1
+        fi
         write_credentials "$updated_creds"
 
         # Retry the usage API with new token
