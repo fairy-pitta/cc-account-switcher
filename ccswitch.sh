@@ -377,6 +377,9 @@ cred_expiry_epoch() {
 # whichever shape the input used, normalized to single-line.
 cred_set_tokens() {
     local cred="$1" access="$2" refresh="$3" out
+    if ! printf '%s' "$cred" | jq -e . >/dev/null 2>&1; then
+        return 1   # not valid JSON; refuse to write back garbage
+    fi
     if printf '%s' "$cred" | jq -e '.claudeAiOauth' >/dev/null 2>&1; then
         out=$(printf '%s' "$cred" | jq --arg a "$access" --arg r "$refresh" \
             '.claudeAiOauth.accessToken = $a | .claudeAiOauth.refreshToken = $r' 2>/dev/null)

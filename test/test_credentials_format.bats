@@ -5,7 +5,7 @@ load test_helper
 setup() { setup_test_env; }
 teardown() { teardown_test_env; }
 
-NESTED='{"claudeAiOauth":{"accessToken":"AT-nested","refreshToken":"RT-nested","expiresAt":9999999999000}}'
+NESTED='{"claudeAiOauth":{"accessToken":"AT-nested","refreshToken":"RT-nested","expiresAt":9999999999000,"scopes":["user:inference"]}}'
 FLAT='{"access_token":"AT-flat","refresh_token":"RT-flat"}'
 
 @test "test_cred_access_token_reads_nested_format" {
@@ -54,6 +54,8 @@ FLAT='{"access_token":"AT-flat","refresh_token":"RT-flat"}'
     [ "$(printf '%s' "$out" | wc -l | tr -d ' ')" -eq 0 ]
     [ "$(printf '%s' "$out" | jq -r '.claudeAiOauth.accessToken')" = "NEW-AT" ]
     [ "$(printf '%s' "$out" | jq -r '.claudeAiOauth.refreshToken')" = "NEW-RT" ]
+    [ "$(printf '%s' "$out" | jq -r '.claudeAiOauth.scopes[0]')" = "user:inference" ]
+    [ "$(printf '%s' "$out" | jq -r '.claudeAiOauth.expiresAt')" = "9999999999000" ]
 }
 
 @test "test_cred_set_tokens_updates_flat_keys_for_flat_cred" {
@@ -62,4 +64,15 @@ FLAT='{"access_token":"AT-flat","refresh_token":"RT-flat"}'
     out=$(cred_set_tokens "$FLAT" "NEW-AT" "NEW-RT")
     [ "$(printf '%s' "$out" | jq -r '.access_token')" = "NEW-AT" ]
     [ "$(printf '%s' "$out" | jq -r '.refresh_token')" = "NEW-RT" ]
+}
+
+@test "test_cred_set_tokens_refuses_invalid_json" {
+    source_ccswitch_functions
+    run cred_set_tokens "not json at all" "AT" "RT"
+    [ "$status" -ne 0 ]
+}
+
+@test "test_cred_expiry_epoch_handles_null_expiresat" {
+    source_ccswitch_functions
+    [ -z "$(cred_expiry_epoch '{"claudeAiOauth":{"expiresAt":null,"accessToken":"not-a-jwt"}}')" ]
 }
