@@ -1707,6 +1707,7 @@ fetch_usage_data() {
         refresh_body=$(echo "$refresh_response" | sed '$d')
 
         if [[ "$refresh_code" != "200" ]]; then
+            echo "ccs: account ${current_email} needs re-login — run: claude /login" >&2
             return 1
         fi
 
