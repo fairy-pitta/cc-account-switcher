@@ -1831,7 +1831,8 @@ materialize_config_dir() {
         ep_model=$(account_field "$account_num" model)
         ep_token=$(endpoint_secret "$account_num")
         token_var="ANTHROPIC_API_KEY"; [[ "$ep_th" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
-        mkdir -p "$dest" && chmod 700 "$dest" 2>/dev/null || true
+        mkdir -p "$dest" 2>/dev/null || true
+        chmod 700 "$dest" 2>/dev/null || true
         jq -nc --arg url "$ep_base" --arg tvar "$token_var" --arg tok "$ep_token" --arg model "$ep_model" '
             {env: ({ANTHROPIC_BASE_URL:$url, ($tvar):$tok}
                    + (if $model != "" then {ANTHROPIC_MODEL:$model} else {} end))}
