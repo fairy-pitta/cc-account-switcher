@@ -100,3 +100,22 @@ MOCK_EOF
     run /bin/bash -c "source '$CCSWITCH_SCRIPT'; set +e; probe_endpoint_health 1; echo rc=\$?"
     [[ "$output" == *"rc=0"* ]]
 }
+
+@test "test_probe_reads_secret_from_linux_file_backend" {
+    # Exercise the Linux/WSL file-backed credentials path instead of the macOS
+    # Keychain mock: the secret is stored as a credentials file and the probe
+    # must read it through that backend.
+    create_uname_mock "Linux"
+    mkdir -p "$BACKUP_DIR/credentials"
+    printf '%s' '{"endpointKey":"sk-ep-linux"}' \
+        > "$BACKUP_DIR/credentials/.claude-credentials-1-ep.json"
+    # curl returns 200 only when the file-backed secret reached the header.
+    cat > "$MOCK_BIN/curl" <<'MOCK_EOF'
+#!/bin/bash
+args="$*"
+if [[ "$args" == *"x-api-key: sk-ep-linux"* ]]; then echo "200"; else echo "401"; fi
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+    run /bin/bash -c "source '$CCSWITCH_SCRIPT'; set +e; probe_endpoint_health 1; echo rc=\$?"
+    [[ "$output" == *"rc=0"* ]]
+}

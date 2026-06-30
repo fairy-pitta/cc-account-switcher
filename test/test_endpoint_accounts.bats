@@ -92,12 +92,12 @@ EOF
 
 @test "test_clear_endpoint_env_removes_only_owned_keys" {
     mkdir -p "$HOME/.claude"
-    echo '{"env":{"FOO":"bar","ANTHROPIC_BASE_URL":"u","ANTHROPIC_API_KEY":"k","ANTHROPIC_MODEL":"m"}}' \
+    echo '{"env":{"FOO":"bar","ANTHROPIC_BASE_URL":"u","ANTHROPIC_API_KEY":"k","ANTHROPIC_AUTH_TOKEN":"t","ANTHROPIC_MODEL":"m"}}' \
         > "$HOME/.claude/settings.json"
     /bin/bash -c "source '$CCSWITCH_SCRIPT'; clear_endpoint_env"
     run jq -r '.env.FOO' "$HOME/.claude/settings.json"
     [[ "$output" == "bar" ]]
-    run jq -r '.env | has("ANTHROPIC_BASE_URL") or has("ANTHROPIC_API_KEY") or has("ANTHROPIC_MODEL")' \
+    run jq -r '.env | has("ANTHROPIC_BASE_URL") or has("ANTHROPIC_API_KEY") or has("ANTHROPIC_AUTH_TOKEN") or has("ANTHROPIC_MODEL")' \
         "$HOME/.claude/settings.json"
     [[ "$output" == "false" ]]
 }

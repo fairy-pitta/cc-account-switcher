@@ -61,8 +61,15 @@ seed() {
 @test "test_exec_endpoint_exports_env_vars" {
     seed
     ep=$(jq -r '.accounts | to_entries[] | select(.value.label=="ep") | .key' "$SEQUENCE_FILE")
-    run run_ccswitch exec "$ep" -- /bin/bash -c 'echo "U=$ANTHROPIC_BASE_URL K=$ANTHROPIC_API_KEY"'
+    # Assert the secret inside the subprocess and emit only a sentinel so the
+    # API key never reaches stdout.
+    run run_ccswitch exec "$ep" -- /bin/bash -c '
+        [[ "$ANTHROPIC_BASE_URL" == "https://ep.test/v1" ]] &&
+        [[ "$ANTHROPIC_API_KEY" == "sk-ep" ]] &&
+        echo ok
+    '
     [ "$status" -eq 0 ]
-    [[ "$output" == *"U=https://ep.test/v1"* ]]
-    [[ "$output" == *"K=sk-ep"* ]]
+    [[ "$output" == *"ok"* ]]
+    # The secret must never reach stdout/stderr.
+    [[ "$output" != *"sk-ep"* ]]
 }

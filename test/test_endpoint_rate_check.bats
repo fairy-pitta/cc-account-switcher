@@ -5,9 +5,11 @@ load test_helper
 setup() {
     setup_test_env
     export RESTART_FLAG="no-restart"
+    # Keep the usage cache inside the fixture so the suite stays hermetic and
+    # portable (no host-global /tmp dependency).
+    export CCS_USAGE_CACHE="$TEST_HOME/claude-usage-cache.json"
 }
 teardown() {
-    rm -f /tmp/claude-usage-cache.json
     teardown_test_env
 }
 
@@ -49,6 +51,9 @@ MOCK_EOF
     run run_ccswitch --no-restart rate-check --auto-switch
     [ "$status" -eq 1 ]
     [[ "$output" == *"Switched to Account-1"* ]]
+    # The fallback must actually persist the switch, not just print the message.
+    run jq -r '.activeAccountNumber' "$SEQUENCE_FILE"
+    [[ "$output" == "1" ]]
 }
 
 @test "test_rate_check_endpoint_unhealthy_hook_mode_denies_with_switch" {
@@ -61,4 +66,7 @@ MOCK_EOF
     run run_ccswitch rate-check --auto-switch --hook-mode
     [ "$status" -eq 0 ]
     [[ "$output" == *"permissionDecision"* ]]
+    # The fallback must actually persist the switch, not just emit the deny JSON.
+    run jq -r '.activeAccountNumber' "$SEQUENCE_FILE"
+    [[ "$output" == "1" ]]
 }
