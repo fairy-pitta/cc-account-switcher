@@ -78,7 +78,7 @@ Branch on the active account's `authType`:
 2. **Active = endpoint** → no usage API; **probe-based health check**:
    - `ccs` issues a lightweight request to the active `ANTHROPIC_BASE_URL` using the stored key: first try `GET {baseUrl}/models`; if unsupported, fall back to a minimal `POST {baseUrl}/messages` with `max_tokens: 1`.
    - Classify HTTP status: `401/403` (auth), `429` (rate/credit), `5xx`, or timeout ⇒ **unhealthy** ⇒ trigger fallback. `2xx` ⇒ healthy.
-   - Result is cached in the existing `/tmp/claude-usage-cache.json` framework (reuse TTL) so probing does not run on every tool call.
+   - Result is cached via the existing temp/cache-file helper (reuse TTL) so probing does not hardcode `/tmp` and stays portable across macOS, Linux, WSL, and Git Bash.
 3. **Fallback target selection:** walk `sequence` order across the mixed oauth/endpoint list. For each candidate verify health (`oauth`: utilization < threshold; `endpoint`: probe returns `2xx`) and switch to the first healthy one. If none are healthy, emit the existing deny protocol (exit 3).
 
 Accepted trade-off: endpoint fallback is **reactive** — it fires after the endpoint actually rejects a request (e.g. 429), not pre-emptively. This is inherent to having no usage API.
