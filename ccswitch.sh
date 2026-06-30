@@ -545,6 +545,12 @@ readonly CCS_ENV_KEYS=("ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" "ANTHROPIC_AUTH_
 
 ccs_settings_file() { echo "$HOME/.claude/settings.json"; }
 
+# Path to the OAuth usage cache. Honors $CCS_USAGE_CACHE so tests can keep it in
+# their fixture instead of a host-global temp file.
+usage_cache_file() {
+    echo "${CCS_USAGE_CACHE:-/tmp/claude-usage-cache.json}"
+}
+
 # write_endpoint_env <base_url> <token_header: api_key|auth_token> <token> <model-or-empty>
 write_endpoint_env() {
     local base_url="$1" token_header="$2" token="$3" model="$4"
@@ -552,7 +558,13 @@ write_endpoint_env() {
     mkdir -p "$(dirname "$file")"
 
     local base='{}'
-    if [[ -f "$file" ]] && jq -e . "$file" >/dev/null 2>&1; then
+    # Fail closed on a malformed settings.json: rewriting it from {} would drop
+    # unrelated user settings, so abort the switch instead.
+    if [[ -f "$file" ]]; then
+        if ! jq -e . "$file" >/dev/null 2>&1; then
+            echo "Error: invalid settings file at $file" >&2
+            return 1
+        fi
         base=$(cat "$file")
     fi
 
@@ -1255,6 +1267,13 @@ cmd_add_endpoint() {
         echo "Error: a non-empty label is required"
         exit 1
     fi
+    # The label becomes part of the file-backed credential id on Linux/WSL
+    # (.claude-credentials-<num>-<label>.json), so reject path-unsafe characters
+    # to keep endpoint accounts portable across macOS and Linux/WSL.
+    if [[ ! "$label" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "Error: label may only contain letters, numbers, dot, underscore, and hyphen"
+        exit 1
+    fi
     local base_url="" model="" token_header="api_key" key_stdin=false
     # Guard value-taking options so a missing value gives a clear error instead
     # of tripping `set -u` ($2: unbound variable).
@@ -1372,8 +1391,9 @@ cmd_remove_account() {
         exit 1
     fi
 
-    local email
+    local email auth_type
     email=$(echo "$account_info" | jq -r '.label // .email')
+    auth_type=$(echo "$account_info" | jq -r '.authType // "oauth"')
 
     local active_account
     active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
@@ -1403,11 +1423,20 @@ cmd_remove_account() {
     esac
     rm -f "$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
 
-    # Update sequence.json
+    # Removing the active account leaves the global state pointing at a deleted
+    # slot. For an active endpoint account, also strip the ccs-owned ANTHROPIC_*
+    # env from settings.json so status/switch don't run against stale config.
+    if [[ "$active_account" == "$account_num" ]]; then
+        [[ "$auth_type" == "endpoint" ]] && clear_endpoint_env
+    fi
+
+    # Update sequence.json. Reset activeAccountNumber when it pointed at the
+    # account being removed so it never references a deleted slot.
     local updated_sequence
     updated_sequence=$(jq --arg num "$account_num" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
         del(.accounts[$num]) |
         .sequence = (.sequence | map(select(. != ($num | tonumber)))) |
+        (if (.activeAccountNumber | tostring) == $num then .activeAccountNumber = null else . end) |
         .lastUpdated = $now
     ' "$SEQUENCE_FILE")
 
@@ -1830,6 +1859,12 @@ materialize_config_dir() {
         ep_th=$(account_field "$account_num" tokenHeader api_key)
         ep_model=$(account_field "$account_num" model)
         ep_token=$(endpoint_secret "$account_num")
+        # Surface credential-store corruption instead of writing a broken config
+        # (mirrors the OAuth branch's missing-data guard below).
+        if [[ -z "$ep_base" || -z "$ep_token" ]]; then
+            echo "Error: missing endpoint base URL or secret for Account-$account_num ($email)" >&2
+            return 1
+        fi
         token_var="ANTHROPIC_API_KEY"; [[ "$ep_th" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
         mkdir -p "$dest" 2>/dev/null || true
         chmod 700 "$dest" 2>/dev/null || true
@@ -1998,6 +2033,9 @@ cmd_exec() {
         token_var="ANTHROPIC_API_KEY"; [[ "$ep_th" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
         ep_base=$(account_field "$account_num" baseUrl)
         ep_model=$(account_field "$account_num" model)
+        # Start from a clean ccs-owned slate so the child never inherits the
+        # caller shell's stale token/model or the opposite token var.
+        unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
         export ANTHROPIC_BASE_URL="$ep_base"
         # Only export a model override when one is configured, so an unset model
         # doesn't blank out Claude Code's default (mirrors materialize_config_dir).
@@ -2074,10 +2112,10 @@ probe_endpoint_health() {
 }
 
 # Fetch usage data from Anthropic OAuth Usage API
-# Writes to /tmp/claude-usage-cache.json with active_account field
+# Writes the usage cache (see usage_cache_file) with active_account field
 # Returns 0 on success, 1 on failure
 fetch_usage_data() {
-    local cache_file="/tmp/claude-usage-cache.json"
+    local cache_file; cache_file=$(usage_cache_file)
     local current_email
     current_email=$(get_current_account)
 
@@ -2186,7 +2224,7 @@ cmd_rate_check() {
     local hook_mode=false
     local refresh=false
     local max_age=""
-    local cache_file="/tmp/claude-usage-cache.json"
+    local cache_file; cache_file=$(usage_cache_file)
 
     # Parse flags
     while [[ $# -gt 0 ]]; do
@@ -2627,12 +2665,12 @@ show_usage() {
     echo "  add                              Add current account to managed accounts"
     echo "  add-endpoint <label> --base-url <URL> [--model M] [--token-header api_key|auth_token]"
     echo "                                   Add a custom ANTHROPIC_BASE_URL endpoint as an account"
-    echo "  rm <num|email>                   Remove account by number or email"
+    echo "  rm <num|email|label>             Remove account by number, email, or endpoint label"
     echo "  ls                               List all managed accounts"
     echo ""
     echo "Switching:"
     echo "  sw                               Rotate to next account in sequence"
-    echo "  to <num|email|profile>           Switch to specific account"
+    echo "  to <num|email|profile|label>     Switch to specific account"
     echo ""
     echo "Profile Management:"
     echo "  profile <num|email> <name>       Set a friendly profile name for an account"
@@ -2642,8 +2680,8 @@ show_usage() {
     echo "  auto                             Switch based on current directory mapping"
     echo ""
     echo "Parallel / isolated accounts (CLAUDE_CONFIG_DIR):"
-    echo "  exec <num|email> -- <command>    Run a command as an account, isolated"
-    echo "  config-dir <num|email> [path]    Materialize an account's config dir, print it"
+    echo "  exec <num|email|label> -- <cmd>  Run a command as an account, isolated"
+    echo "  config-dir <num|email|label> [path]  Materialize an account's config dir, print it"
     echo ""
     echo "Rate Limiting:"
     echo "  rate-check [--threshold N]       Check if usage exceeds threshold"
