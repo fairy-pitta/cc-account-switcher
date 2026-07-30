@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-30
+
+### Added
+
+- Custom endpoint accounts: `ccs add-endpoint <label> --base-url <url> --token-header <api_key|auth_token>` registers an account backed by a custom `ANTHROPIC_BASE_URL` and API key / auth token (OpenRouter, gateways, proxies, self-hosted) alongside the existing OAuth accounts. Switching, `status`, `exec`, and `config-dir` all understand endpoint accounts — a switch writes the endpoint env block into `~/.claude/settings.json` and clears it when switching back to an OAuth account ([#36](https://github.com/fairy-pitta/cc-account-switcher/issues/36))
+- Reactive fallback for endpoint accounts: `ccs rate-check` health-probes the active endpoint over HTTP and rotates to the next account in the sequence when it's unhealthy or rate-limited ([#36](https://github.com/fairy-pitta/cc-account-switcher/issues/36))
+
+### Changed
+
+- The usage cache path now resolves via `$TMPDIR` / `$TMP` / `$TEMP` (falling back to `/tmp`, overridable with `$CCS_USAGE_CACHE`) instead of a hardcoded `/tmp`, so macOS, WSL, and Git Bash all use their real temp directory. The statusline (writer) and rate hook (reader) resolve the same way ([#40](https://github.com/fairy-pitta/cc-account-switcher/pull/40))
+
 ## [0.4.1] - 2026-06-25
 
 ### Added
