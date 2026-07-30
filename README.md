@@ -26,6 +26,7 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 - **Dry-run mode** — Preview what a switch would do without making changes
 - **Rollback** — Automatic rollback if a switch fails mid-way
 - **Rate limit auto-switch** — Automatically switch accounts when usage limits are hit, via Claude Code hooks
+- **Custom endpoints** — Add `ANTHROPIC_BASE_URL` + API key/token providers (OpenRouter, gateways, proxies, self-hosted) as switchable accounts via `ccs add-endpoint`
 - **Conversation handoff** — `--resume` carries your current conversation across a switch (fork-resume)
 - **Parallel isolation** — Run commands as a specific account in their own `CLAUDE_CONFIG_DIR` (`ccs exec` / `config-dir`; Linux/WSL)
 - **Diagnostics** — Health checks, status, and per-account usage statistics
@@ -127,6 +128,29 @@ directory, it starts fresh.
 > on Claude Code's session model. If it can't, the switch still succeeds and you land in
 > a fresh session.
 
+### Custom endpoints
+
+Add an Anthropic-compatible endpoint as a switchable account:
+
+```bash
+# API-key (x-api-key) provider, key read from a prompt (not shell history)
+ccs add-endpoint openrouter --base-url https://openrouter.ai/api/v1 --token-header api_key
+
+# Bearer-token provider, key piped in
+echo "$MY_TOKEN" | ccs add-endpoint gateway --base-url https://gw.corp/v1 --token-header auth_token --key-stdin --model claude-3-5-sonnet
+
+ccs to openrouter        # switch (writes ANTHROPIC_* into ~/.claude/settings.json env)
+ccs to 1                 # switch back to an OAuth account (removes those env vars)
+```
+
+Switching to/from an endpoint changes Claude Code's `settings.json` `env`, which
+is read at startup — **restart Claude Code** (or use `-r` / `--resume`) for the
+change to take effect.
+
+Endpoints also participate in rate-limit auto-switch: because they have no usage
+API, `ccs` probes the endpoint (`/models`, then `/messages`) and falls back to the
+next account when it returns auth, rate-limit, server, or timeout errors.
+
 ### Profiles
 
 ```bash
@@ -163,7 +187,7 @@ ccs rate-setup --disable         # Remove hook and disable
 
 **How it works:**
 
-1. The usage cache lives at `/tmp/claude-usage-cache.json` with a `cached_at` timestamp.
+1. The usage cache lives at `$TMPDIR/claude-usage-cache.json` (falling back to `/tmp` when `$TMPDIR`/`$TMP`/`$TEMP` are unset; override with `$CCS_USAGE_CACHE`) with a `cached_at` timestamp.
 2. Before each tool call the PreToolUse hook checks the cache. If it's fresh (younger than the TTL) and under threshold, it returns immediately (~20ms, no API call).
 3. If the cache is missing, stale, or for a different account, the hook refreshes it from the [Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage) on demand — so it works in headless `claude -p` runs with no statusline.
 4. If usage exceeds the threshold, it switches to the next account and tells Claude Code to deny the tool call with a "please restart" message.

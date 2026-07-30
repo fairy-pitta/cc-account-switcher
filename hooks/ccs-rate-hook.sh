@@ -15,7 +15,15 @@ set -uo pipefail  # No -e: we handle errors manually
 # shellcheck disable=SC2034  # INPUT consumed per hook protocol, not used in script
 INPUT=$(cat)
 
-CACHE_FILE="/tmp/claude-usage-cache.json"
+# Resolve the usage cache the same way ccswitch.sh's usage_cache_file() does so
+# reader (this hook) and writer (statusline) always agree: honor
+# $CCS_USAGE_CACHE, else the system temp dir ($TMPDIR/$TMP/$TEMP, else /tmp).
+if [[ -n "${CCS_USAGE_CACHE:-}" ]]; then
+    CACHE_FILE="$CCS_USAGE_CACHE"
+else
+    _cache_dir="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
+    CACHE_FILE="${_cache_dir%/}/claude-usage-cache.json"
+fi
 THRESHOLD=80
 CACHE_TTL=60
 

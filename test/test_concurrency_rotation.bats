@@ -39,7 +39,7 @@ MOCK_EOF
 }
 
 teardown() {
-    rm -f /tmp/claude-usage-cache.json
+    rm -f "$CCS_USAGE_CACHE"
     teardown_test_env
 }
 

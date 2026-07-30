@@ -58,7 +58,7 @@ EOF
     add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
 
     # Ensure no cache file exists
-    rm -f /tmp/claude-usage-cache.json
+    rm -f "$CCS_USAGE_CACHE"
 
     # Offline: a failing fetch with no cache to fall back to → error exit 2.
     cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
@@ -201,7 +201,7 @@ create_aged_cache() {
     local utilization="${2:-50}"
     local email="${3:-user1@example.com}"
     local ts=$(( $(date +%s) - age ))
-    cat > /tmp/claude-usage-cache.json <<EOF
+    cat > "$CCS_USAGE_CACHE" <<EOF
 {
   "five_hour": { "utilization": $utilization, "limit": 100, "used": $utilization },
   "active_account": "$email",
@@ -315,7 +315,7 @@ MOCK_EOF
     source_ccswitch_functions
     run fetch_usage_data
     [ "$status" -eq 0 ]
-    [ "$(jq -r '.five_hour.utilization' /tmp/claude-usage-cache.json)" = "42" ]
+    [ "$(jq -r '.five_hour.utilization' "$CCS_USAGE_CACHE")" = "42" ]
 }
 
 @test "test_fetch_usage_data_refresh_writes_back_nested_shape" {
@@ -373,7 +373,7 @@ MOCK_EOF
     setup_fake_account "user1@example.com" "uuid-1"
     add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
     create_fake_credentials_nested "AT-x" "RT-x" 9999999999000
-    rm -f /tmp/claude-usage-cache.json
+    rm -f "$CCS_USAGE_CACHE"
 
     cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
 #!/bin/bash

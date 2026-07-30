@@ -144,6 +144,12 @@ resolve_account_identifier() {
         account_num=$(jq -r --arg profile "$identifier" '.accounts | to_entries[] | select(.value.profile == $profile) | .key' "$SEQUENCE_FILE" 2>/dev/null)
         if [[ -n "$account_num" && "$account_num" != "null" ]]; then
             echo "$account_num"
+            return
+        fi
+        # Try endpoint label
+        account_num=$(jq -r --arg label "$identifier" '.accounts | to_entries[] | select(.value.label == $label) | .key' "$SEQUENCE_FILE" 2>/dev/null)
+        if [[ -n "$account_num" && "$account_num" != "null" ]]; then
+            echo "$account_num"
         else
             echo ""
         fi
@@ -478,6 +484,140 @@ write_account_config() {
     chmod 600 "$config_file"
 }
 
+# --- Account type helpers -------------------------------------------------
+# Endpoint accounts (authType:"endpoint") carry a base URL + API key/token in
+# the env block instead of OAuth credentials. authType is absent on legacy
+# records, which therefore read as "oauth".
+
+account_auth_type() {
+    local num="$1"
+    jq -r --arg n "$num" '.accounts[$n].authType // "oauth"' "$SEQUENCE_FILE" 2>/dev/null || echo "oauth"
+}
+
+is_endpoint_account() {
+    [[ "$(account_auth_type "$1")" == "endpoint" ]]
+}
+
+# Read one field from an account record, with a default when absent/null.
+account_field() {
+    local num="$1" field="$2" default="${3:-}"
+    local v
+    v=$(jq -r --arg n "$num" --arg f "$field" '.accounts[$n][$f] // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    if [[ -z "$v" ]]; then echo "$default"; else echo "$v"; fi
+}
+
+# Human identifier: label for endpoints, email for oauth accounts.
+account_display_id() {
+    local num="$1"
+    if is_endpoint_account "$num"; then
+        account_field "$num" "label"
+    else
+        account_field "$num" "email"
+    fi
+}
+
+# Which account is actually live. Endpoint accounts leave .claude.json's email
+# untouched, so when activeAccountNumber points at an endpoint we trust it;
+# otherwise we map the live oauth email to its slot (handles external relogin).
+effective_active_account_num() {
+    local an
+    an=$(jq -r '.activeAccountNumber // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    if [[ -n "$an" ]] && is_endpoint_account "$an"; then
+        echo "$an"
+        return
+    fi
+    local email
+    email=$(get_current_account)
+    jq -r --arg e "$email" '(.accounts | to_entries[] | select(.value.email == $e) | .key) // empty' \
+        "$SEQUENCE_FILE" 2>/dev/null || true
+}
+
+# --- Endpoint env block (settings.json) -----------------------------------
+# Switching to an endpoint writes ANTHROPIC_* into the user-global settings env
+# block; switching to oauth removes exactly those keys so stored OAuth creds
+# take over again. settings.json env is applied at Claude Code startup, so a
+# restart is required for an endpoint-crossing switch to take effect.
+
+# Env keys ccs owns. The token var (api key vs auth token) is also in this set
+# so the unused one is always cleared.
+# shellcheck disable=SC2034
+readonly CCS_ENV_KEYS=("ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" "ANTHROPIC_AUTH_TOKEN" "ANTHROPIC_MODEL")
+
+ccs_settings_file() { echo "$HOME/.claude/settings.json"; }
+
+# Path to the OAuth usage cache. Honors $CCS_USAGE_CACHE so tests can keep it in
+# their fixture instead of a host-global temp file. Otherwise it resolves the
+# system temp dir ($TMPDIR/$TMP/$TEMP, falling back to /tmp) so macOS, Linux,
+# WSL, and Git Bash all agree. The statusline (writer) and rate hook (reader)
+# resolve the same way — keep the three in sync.
+usage_cache_file() {
+    if [[ -n "${CCS_USAGE_CACHE:-}" ]]; then
+        echo "$CCS_USAGE_CACHE"
+        return
+    fi
+    local cache_dir="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
+    echo "${cache_dir%/}/claude-usage-cache.json"
+}
+
+# write_endpoint_env <base_url> <token_header: api_key|auth_token> <token> <model-or-empty>
+write_endpoint_env() {
+    local base_url="$1" token_header="$2" token="$3" model="$4"
+    local file; file="$(ccs_settings_file)"
+    mkdir -p "$(dirname "$file")"
+
+    local base='{}'
+    # Fail closed on a malformed settings.json: rewriting it from {} would drop
+    # unrelated user settings, so abort the switch instead.
+    if [[ -f "$file" ]]; then
+        if ! jq -e . "$file" >/dev/null 2>&1; then
+            echo "Error: invalid settings file at $file" >&2
+            return 1
+        fi
+        base=$(cat "$file")
+    fi
+
+    local token_var="ANTHROPIC_API_KEY"
+    [[ "$token_header" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
+
+    local updated
+    updated=$(printf '%s' "$base" | jq \
+        --arg url "$base_url" --arg tvar "$token_var" --arg tok "$token" --arg model "$model" '
+        .env = (.env // {})
+        # Start from a clean ccs-owned slate so a stale token var is dropped.
+        | .env |= (del(.ANTHROPIC_BASE_URL, .ANTHROPIC_API_KEY, .ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_MODEL))
+        | .env.ANTHROPIC_BASE_URL = $url
+        | .env[$tvar] = $tok
+        | (if $model != "" then .env.ANTHROPIC_MODEL = $model else . end)
+    ') || return 1
+
+    write_json "$file" "$updated"
+}
+
+# Remove all ccs-owned env keys (used when switching back to an oauth account).
+clear_endpoint_env() {
+    local file; file="$(ccs_settings_file)"
+    [[ -f "$file" ]] || return 0
+    jq -e . "$file" >/dev/null 2>&1 || return 0
+    local updated
+    updated=$(jq '
+        if (.env | type) == "object"
+        then .env |= del(.ANTHROPIC_BASE_URL, .ANTHROPIC_API_KEY, .ANTHROPIC_AUTH_TOKEN, .ANTHROPIC_MODEL)
+        else . end
+    ' "$file") || return 0
+    write_json "$file" "$updated"
+}
+
+# Endpoint secrets are stored in the same per-account credential slot used for
+# OAuth, wrapped as {"endpointKey":"<token>"} so the existing Keychain/file
+# path (read/write_account_credentials) is reused and the raw key never lands
+# in sequence.json.
+endpoint_secret() {
+    local num="$1" label creds
+    label=$(account_field "$num" "label")
+    creds=$(read_account_credentials "$num" "$label")
+    printf '%s' "$creds" | jq -r '.endpointKey // empty' 2>/dev/null
+}
+
 # Initialize sequence.json if it doesn't exist
 init_sequence_file() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
@@ -771,6 +911,25 @@ cmd_status() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
         echo "No accounts are managed yet."
         exit 0
+    fi
+
+    local _active_num
+    _active_num=$(effective_active_account_num)
+    if [[ -n "$_active_num" ]] && is_endpoint_account "$_active_num"; then
+        echo "Account Status"
+        echo "=============="
+        echo ""
+        echo "Current account: $(account_display_id "$_active_num") [endpoint]"
+        echo "Account number:  $_active_num"
+        echo "Base URL:        $(account_field "$_active_num" baseUrl)"
+        local _m; _m=$(account_field "$_active_num" model)
+        [[ -n "$_m" ]] && echo "Model:           $_m"
+        echo "Auth:            $(account_field "$_active_num" tokenHeader api_key) (key hidden)"
+        local _lu; _lu=$(jq -r '.lastUpdated // empty' "$SEQUENCE_FILE" 2>/dev/null)
+        [[ -n "$_lu" ]] && echo "Last switch:     $_lu"
+        echo ""
+        echo "Note: settings.json env applies on Claude Code restart."
+        return 0
     fi
 
     local current_email
@@ -1099,6 +1258,112 @@ cmd_add_account() {
     echo "Added Account $account_num: $current_email"
 }
 
+# Add a custom-endpoint account.
+# Usage: ccs add-endpoint <label> --base-url <URL> [--model <M>]
+#        [--token-header api_key|auth_token] [--key-stdin]
+cmd_add_endpoint() {
+    setup_directories
+    init_sequence_file
+
+    if [[ $# -eq 0 ]]; then
+        echo "Usage: ccs add-endpoint <label> --base-url <URL> [--model <M>] [--token-header api_key|auth_token] [--key-stdin]"
+        exit 1
+    fi
+
+    local label="$1"; shift
+    if [[ -z "$label" || "$label" == --* ]]; then
+        echo "Error: a non-empty label is required"
+        exit 1
+    fi
+    # The label becomes part of the file-backed credential id on Linux/WSL
+    # (.claude-credentials-<num>-<label>.json), so reject path-unsafe characters
+    # to keep endpoint accounts portable across macOS and Linux/WSL.
+    if [[ ! "$label" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "Error: label may only contain letters, numbers, dot, underscore, and hyphen"
+        exit 1
+    fi
+    local base_url="" model="" token_header="api_key" key_stdin=false
+    # Guard value-taking options so a missing value gives a clear error instead
+    # of tripping `set -u` ($2: unbound variable).
+    _require_value() { [[ $# -ge 2 ]] || { echo "Error: $1 requires a value"; exit 1; }; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --base-url)     _require_value "$@"; base_url="$2"; shift 2 ;;
+            --model)        _require_value "$@"; model="$2"; shift 2 ;;
+            --token-header) _require_value "$@"; token_header="$2"; shift 2 ;;
+            --key-stdin)    key_stdin=true; shift ;;
+            *) echo "Error: unknown option '$1'"; exit 1 ;;
+        esac
+    done
+
+    if [[ -z "$base_url" ]]; then
+        echo "Error: --base-url is required"
+        exit 1
+    fi
+    if [[ "$token_header" != "api_key" && "$token_header" != "auth_token" ]]; then
+        echo "Error: --token-header must be 'api_key' or 'auth_token'"
+        exit 1
+    fi
+    if [[ ! "$base_url" =~ ^https?:// ]]; then
+        echo "Error: --base-url must start with http:// or https://"
+        exit 1
+    fi
+
+    # Reject a duplicate label (or an email/profile collision).
+    # resolve_account_identifier checks email and profile; also check endpoint labels.
+    local existing_num
+    existing_num=$(resolve_account_identifier "$label")
+    if [[ -z "$existing_num" ]]; then
+        existing_num=$(jq -r --arg lbl "$label" \
+            '.accounts | to_entries[] | select(.value.label == $lbl) | .key' \
+            "$SEQUENCE_FILE" 2>/dev/null)
+    fi
+    if [[ -n "$existing_num" ]]; then
+        echo "Error: an account named '$label' already exists"
+        exit 1
+    fi
+
+    # Read the secret without echoing it / leaving it in shell history.
+    local token=""
+    if [[ "$key_stdin" == true ]]; then
+        IFS= read -r token || true
+    else
+        read -rs -p "API key/token for '$label': " token
+        echo ""
+    fi
+    if [[ -z "$token" ]]; then
+        echo "Error: no API key/token provided"
+        exit 1
+    fi
+
+    local account_num
+    account_num=$(get_next_account_number)
+
+    # Store the secret via the existing per-account credential path.
+    local cred_json
+    cred_json=$(jq -nc --arg k "$token" '{endpointKey:$k}')
+    write_account_credentials "$account_num" "$label" "$cred_json"
+
+    local updated
+    updated=$(jq \
+        --arg num "$account_num" --arg label "$label" --arg url "$base_url" \
+        --arg model "$model" --arg th "$token_header" \
+        --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .accounts[$num] = ({
+            authType: "endpoint",
+            label: $label,
+            baseUrl: $url,
+            tokenHeader: $th,
+            added: $now
+        } + (if $model != "" then {model: $model} else {} end))
+        | .sequence += [$num | tonumber]
+        | .lastUpdated = $now
+    ' "$SEQUENCE_FILE")
+    write_json "$SEQUENCE_FILE" "$updated"
+
+    echo "Added endpoint Account $account_num: $label ($base_url)"
+}
+
 # Remove account
 cmd_remove_account() {
     if [[ $# -eq 0 ]]; then
@@ -1118,16 +1383,10 @@ cmd_remove_account() {
     if [[ "$identifier" =~ ^[0-9]+$ ]]; then
         account_num="$identifier"
     else
-        # Validate email format
-        if ! validate_email "$identifier"; then
-            echo "Error: Invalid email format: $identifier"
-            exit 1
-        fi
-
-        # Resolve email to account number
+        # Resolve email / profile / endpoint label to an account number.
         account_num=$(resolve_account_identifier "$identifier")
         if [[ -z "$account_num" ]]; then
-            echo "Error: No account found with email: $identifier"
+            echo "Error: No account found matching: $identifier"
             exit 1
         fi
     fi
@@ -1140,8 +1399,9 @@ cmd_remove_account() {
         exit 1
     fi
 
-    local email
-    email=$(echo "$account_info" | jq -r '.email')
+    local email auth_type
+    email=$(echo "$account_info" | jq -r '.label // .email')
+    auth_type=$(echo "$account_info" | jq -r '.authType // "oauth"')
 
     local active_account
     active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
@@ -1171,11 +1431,20 @@ cmd_remove_account() {
     esac
     rm -f "$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
 
-    # Update sequence.json
+    # Removing the active account leaves the global state pointing at a deleted
+    # slot. For an active endpoint account, also strip the ccs-owned ANTHROPIC_*
+    # env from settings.json so status/switch don't run against stale config.
+    if [[ "$active_account" == "$account_num" ]]; then
+        [[ "$auth_type" == "endpoint" ]] && clear_endpoint_env
+    fi
+
+    # Update sequence.json. Reset activeAccountNumber when it pointed at the
+    # account being removed so it never references a deleted slot.
     local updated_sequence
     updated_sequence=$(jq --arg num "$account_num" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
         del(.accounts[$num]) |
         .sequence = (.sequence | map(select(. != ($num | tonumber)))) |
+        (if (.activeAccountNumber | tostring) == $num then .activeAccountNumber = null else . end) |
         .lastUpdated = $now
     ' "$SEQUENCE_FILE")
 
@@ -1214,25 +1483,21 @@ cmd_list() {
         exit 0
     fi
 
-    # Get current active account from .claude.json
-    local current_email
-    current_email=$(get_current_account)
-
-    # Find which account number corresponds to the current email
+    # Find which account number is active (endpoint-aware).
     local active_account_num=""
-    if [[ "$current_email" != "none" ]]; then
-        active_account_num=$(jq -r --arg email "$current_email" '.accounts | to_entries[] | select(.value.email == $email) | .key' "$SEQUENCE_FILE" 2>/dev/null)
-    fi
+    active_account_num=$(effective_active_account_num)
 
     echo "Accounts:"
     jq -r --arg active "$active_account_num" '
         .sequence[] as $num |
-        .accounts["\($num)"] |
-        (if .profile then " [\(.profile)]" else "" end) as $prof |
+        .accounts["\($num)"] as $a |
+        ($a.label // $a.email) as $id |
+        (if $a.authType == "endpoint" then " [endpoint]"
+         elif $a.profile then " [\($a.profile)]" else "" end) as $tag |
         if "\($num)" == $active then
-            "  \($num): \(.email)\($prof) (active)"
+            "  \($num): \($id)\($tag) (active)"
         else
-            "  \($num): \(.email)\($prof)"
+            "  \($num): \($id)\($tag)"
         end
     ' "$SEQUENCE_FILE"
 }
@@ -1328,7 +1593,7 @@ perform_switch() {
     # Get current and target account info
     local current_account target_email current_email
     current_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    target_email=$(jq -r --arg num "$target_account" '.accounts[$num].email' "$SEQUENCE_FILE")
+    target_email=$(jq -r --arg num "$target_account" '.accounts[$num].label // .accounts[$num].email' "$SEQUENCE_FILE")
     current_email=$(get_current_account)
 
     # Capture the conversation pointer from the OUTGOING .claude.json (before the
@@ -1370,27 +1635,34 @@ perform_switch() {
     # The email in .claude.json is the source of truth for whose credential is
     # live; trusting a stale number would back the live credential up under the
     # wrong slot and restore a stale one, destroying the working session.
-    local real_current_account
-    real_current_account=$(jq -r --arg email "$current_email" '
-        (.accounts | to_entries[] | select(.value.email == $email) | .key) // empty
-    ' "$SEQUENCE_FILE" 2>/dev/null)
+    # When the live account is an endpoint, activeAccountNumber is authoritative
+    # (no oauth email to reconcile against). Only reconcile for oauth.
+    local current_is_endpoint=false
+    if is_endpoint_account "$current_account"; then
+        current_is_endpoint=true
+        current_email=$(account_display_id "$current_account")
+    else
+        local real_current_account
+        real_current_account=$(jq -r --arg email "$current_email" '
+            (.accounts | to_entries[] | select(.value.email == $email) | .key) // empty
+        ' "$SEQUENCE_FILE" 2>/dev/null)
 
-    if [[ -z "$real_current_account" ]]; then
-        release_switch_lock
-        if [[ "${CCS_SILENT:-}" != "1" ]]; then
-            echo "Error: the active account ($current_email) is not managed by ccs."
-            echo "Run 'ccs add' before switching so its credentials aren't lost."
-        else
-            echo "Error: active account ($current_email) unmanaged; skipping switch." >&2
+        if [[ -z "$real_current_account" ]]; then
+            release_switch_lock
+            if [[ "${CCS_SILENT:-}" != "1" ]]; then
+                echo "Error: the active account ($current_email) is not managed by ccs."
+                echo "Run 'ccs add' before switching so its credentials aren't lost."
+            else
+                echo "Error: active account ($current_email) unmanaged; skipping switch." >&2
+            fi
+            exit 1
         fi
-        exit 1
-    fi
-
-    if [[ "$real_current_account" != "$current_account" ]]; then
-        if [[ "${CCS_SILENT:-}" != "1" ]]; then
-            echo "Note: corrected active account $current_account -> $real_current_account (was out of sync)."
+        if [[ "$real_current_account" != "$current_account" ]]; then
+            if [[ "${CCS_SILENT:-}" != "1" ]]; then
+                echo "Note: corrected active account $current_account -> $real_current_account (was out of sync)."
+            fi
+            current_account="$real_current_account"
         fi
-        current_account="$real_current_account"
     fi
 
     # No-op guard: if we're already on the target (e.g. a concurrent switch beat
@@ -1406,13 +1678,14 @@ perform_switch() {
         return
     fi
 
-    # Save pre-switch state for rollback
-    local rollback_creds rollback_config rollback_sequence
+    # Save pre-switch state for rollback (settings.json included for env restore).
+    local rollback_creds rollback_config rollback_sequence rollback_settings
     rollback_creds=$(read_credentials)
     rollback_config=$(cat "$(get_claude_config_path)")
     rollback_sequence=$(cat "$SEQUENCE_FILE")
+    rollback_settings=""
+    [[ -f "$(ccs_settings_file)" ]] && rollback_settings=$(cat "$(ccs_settings_file)")
 
-    # Rollback function
     rollback() {
         if [[ "${CCS_SILENT:-}" != "1" ]]; then
             echo ""
@@ -1423,6 +1696,13 @@ perform_switch() {
         write_credentials "$rollback_creds" 2>/dev/null || true
         write_json "$(get_claude_config_path)" "$rollback_config" 2>/dev/null || true
         write_json "$SEQUENCE_FILE" "$rollback_sequence" 2>/dev/null || true
+        if [[ -n "$rollback_settings" ]]; then
+            write_json "$(ccs_settings_file)" "$rollback_settings" 2>/dev/null || true
+        else
+            # No settings.json existed pre-switch: strip any endpoint env we may
+            # have written so a failed switch can't leave an orphaned env block.
+            clear_endpoint_env 2>/dev/null || true
+        fi
         release_switch_lock
         if [[ "${CCS_SILENT:-}" != "1" ]]; then
             echo "Rollback complete. Account-$current_account ($current_email) is still active."
@@ -1431,57 +1711,64 @@ perform_switch() {
         fi
     }
 
-    # Step 1: Backup current account
-    local current_creds current_config
-    current_creds=$(read_credentials)
-    current_config=$(cat "$(get_claude_config_path)")
-
-    if ! write_account_credentials "$current_account" "$current_email" "$current_creds"; then
-        rollback
-        exit 1
-    fi
-    if ! write_account_config "$current_account" "$current_email" "$current_config"; then
-        rollback
-        exit 1
-    fi
-
-    # Step 2: Retrieve target account
-    local target_creds target_config
-    target_creds=$(read_account_credentials "$target_account" "$target_email")
-    target_config=$(read_account_config "$target_account" "$target_email")
-
-    if [[ -z "$target_creds" || -z "$target_config" ]]; then
-        echo "Error: Missing backup data for Account-$target_account"
-        rollback
-        exit 1
+    # Step 1: Back up the OUTGOING account. Endpoint accounts have no live oauth
+    # state to capture (their secret/metadata are static), so skip the backup.
+    if [[ "$current_is_endpoint" != true ]]; then
+        local current_creds current_config
+        current_creds=$(read_credentials)
+        current_config=$(cat "$(get_claude_config_path)")
+        if ! write_account_credentials "$current_account" "$current_email" "$current_creds"; then
+            rollback; exit 1
+        fi
+        if ! write_account_config "$current_account" "$current_email" "$current_config"; then
+            rollback; exit 1
+        fi
     fi
 
-    # Step 3: Activate target account
-    if ! write_credentials "$target_creds"; then
-        rollback
-        exit 1
-    fi
-
-    # Extract oauthAccount from backup and validate
-    local oauth_section
-    oauth_section=$(echo "$target_config" | jq '.oauthAccount' 2>/dev/null)
-    if [[ -z "$oauth_section" || "$oauth_section" == "null" ]]; then
-        echo "Error: Invalid oauthAccount in backup"
-        rollback
-        exit 1
-    fi
-
-    # Merge with current config and validate
-    local merged_config
-    if ! merged_config=$(jq --argjson oauth "$oauth_section" '.oauthAccount = $oauth' "$(get_claude_config_path)" 2>/dev/null); then
-        echo "Error: Failed to merge config"
-        rollback
-        exit 1
-    fi
-
-    if ! write_json "$(get_claude_config_path)" "$merged_config"; then
-        rollback
-        exit 1
+    # Step 2+3: Activate the target, branched on its auth type.
+    if is_endpoint_account "$target_account"; then
+        # Endpoint target: drive Claude Code via the settings env block. Leave
+        # credentials / .claude.json untouched (the dormant oauth login stays).
+        local ep_base ep_th ep_model ep_token
+        ep_base=$(account_field "$target_account" "baseUrl")
+        ep_th=$(account_field "$target_account" "tokenHeader" "api_key")
+        ep_model=$(account_field "$target_account" "model")
+        ep_token=$(endpoint_secret "$target_account")
+        if [[ -z "$ep_base" || -z "$ep_token" ]]; then
+            echo "Error: Missing endpoint config/secret for Account-$target_account"
+            rollback; exit 1
+        fi
+        if ! write_endpoint_env "$ep_base" "$ep_th" "$ep_token" "$ep_model"; then
+            rollback; exit 1
+        fi
+    else
+        # OAuth target: restore credentials + oauthAccount, and remove any
+        # endpoint env so the OAuth login takes over again.
+        local target_creds target_config
+        target_creds=$(read_account_credentials "$target_account" "$target_email")
+        target_config=$(read_account_config "$target_account" "$target_email")
+        if [[ -z "$target_creds" || -z "$target_config" ]]; then
+            echo "Error: Missing backup data for Account-$target_account"
+            rollback; exit 1
+        fi
+        if ! write_credentials "$target_creds"; then
+            rollback; exit 1
+        fi
+        local oauth_section
+        oauth_section=$(echo "$target_config" | jq '.oauthAccount' 2>/dev/null)
+        if [[ -z "$oauth_section" || "$oauth_section" == "null" ]]; then
+            echo "Error: Invalid oauthAccount in backup"
+            rollback; exit 1
+        fi
+        local merged_config
+        if ! merged_config=$(jq --argjson oauth "$oauth_section" '.oauthAccount = $oauth' "$(get_claude_config_path)" 2>/dev/null); then
+            echo "Error: Failed to merge config"
+            rollback; exit 1
+        fi
+        if ! write_json "$(get_claude_config_path)" "$merged_config"; then
+            rollback; exit 1
+        fi
+        clear_endpoint_env
     fi
 
     # Step 4: Update state and usage statistics
@@ -1540,6 +1827,9 @@ perform_switch() {
         # Display updated account list
         cmd_list
         echo ""
+        if is_endpoint_account "$target_account" || [[ "$current_is_endpoint" == true ]]; then
+            echo "Note: this switch changes settings.json env — restart Claude Code for it to take effect."
+        fi
 
         # Handle restart
         handle_restart_after_switch
@@ -1561,11 +1851,37 @@ materialize_config_dir() {
     local account_num="$1"
     local dest="$2"
 
-    local email
-    email=$(jq -r --arg n "$account_num" '.accounts[$n].email // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    local email auth
+    auth=$(account_auth_type "$account_num")
+    email=$(account_display_id "$account_num")
     if [[ -z "$email" ]]; then
         echo "Error: Account-$account_num not found" >&2
         return 1
+    fi
+
+    if [[ "$auth" == "endpoint" ]]; then
+        # Endpoint isolation is just an env-scoped dir: write a settings.json
+        # with the endpoint env so `CLAUDE_CONFIG_DIR=<dest> claude` uses it.
+        local ep_base ep_th ep_model ep_token token_var
+        ep_base=$(account_field "$account_num" baseUrl)
+        ep_th=$(account_field "$account_num" tokenHeader api_key)
+        ep_model=$(account_field "$account_num" model)
+        ep_token=$(endpoint_secret "$account_num")
+        # Surface credential-store corruption instead of writing a broken config
+        # (mirrors the OAuth branch's missing-data guard below).
+        if [[ -z "$ep_base" || -z "$ep_token" ]]; then
+            echo "Error: missing endpoint base URL or secret for Account-$account_num ($email)" >&2
+            return 1
+        fi
+        token_var="ANTHROPIC_API_KEY"; [[ "$ep_th" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
+        mkdir -p "$dest" 2>/dev/null || true
+        chmod 700 "$dest" 2>/dev/null || true
+        jq -nc --arg url "$ep_base" --arg tvar "$token_var" --arg tok "$ep_token" --arg model "$ep_model" '
+            {env: ({ANTHROPIC_BASE_URL:$url, ($tvar):$tok}
+                   + (if $model != "" then {ANTHROPIC_MODEL:$model} else {} end))}
+        ' > "$dest/settings.json" || return 1
+        chmod 600 "$dest/settings.json" 2>/dev/null || true
+        return 0
     fi
 
     local active cfg creds
@@ -1647,7 +1963,7 @@ cmd_config_dir() {
     fi
 
     local email
-    email=$(jq -r --arg n "$account_num" '.accounts[$n].email' "$SEQUENCE_FILE")
+    email=$(account_display_id "$account_num")
     [[ -z "$dest" ]] && dest="$ISOLATED_DIR/${account_num}-${email}"
 
     setup_directories
@@ -1709,7 +2025,7 @@ cmd_exec() {
     fi
 
     local email
-    email=$(jq -r --arg n "$account_num" '.accounts[$n].email' "$SEQUENCE_FILE")
+    email=$(account_display_id "$account_num")
     [[ -z "$dest" ]] && dest="$ISOLATED_DIR/${account_num}-${email}"
 
     setup_directories
@@ -1719,14 +2035,95 @@ cmd_exec() {
 
     _isolation_macos_note
     # Replace this process with the command, scoped to the isolated config dir.
-    CLAUDE_CONFIG_DIR="$dest" exec "${cmd[@]}"
+    if is_endpoint_account "$account_num"; then
+        local ep_th token_var ep_base ep_model
+        ep_th=$(account_field "$account_num" tokenHeader api_key)
+        token_var="ANTHROPIC_API_KEY"; [[ "$ep_th" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
+        ep_base=$(account_field "$account_num" baseUrl)
+        ep_model=$(account_field "$account_num" model)
+        # Start from a clean ccs-owned slate so the child never inherits the
+        # caller shell's stale token/model or the opposite token var.
+        unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
+        export ANTHROPIC_BASE_URL="$ep_base"
+        # Only export a model override when one is configured, so an unset model
+        # doesn't blank out Claude Code's default (mirrors materialize_config_dir).
+        [[ -n "$ep_model" ]] && export ANTHROPIC_MODEL="$ep_model"
+        export CLAUDE_CONFIG_DIR="$dest"
+        export "$token_var=$(endpoint_secret "$account_num")"
+        exec "${cmd[@]}"
+    else
+        CLAUDE_CONFIG_DIR="$dest" exec "${cmd[@]}"
+    fi
+}
+
+# --- Endpoint health probe ------------------------------------------------
+# Endpoints have no usage API; fallback is reactive. A request is "unhealthy"
+# (trigger fallback) on auth failure, rate/credit limit, server error, or
+# timeout; anything else means the endpoint is reachable and usable.
+
+# Classify an HTTP status: prints "unhealthy" for 401/403/429/5xx/000, else
+# "healthy".
+_classify_probe_code() {
+    local code="$1"
+    case "$code" in
+        401|403|429|000) echo "unhealthy" ;;
+        5??)             echo "unhealthy" ;;
+        *)               echo "healthy" ;;
+    esac
+}
+
+# Issue one request and print the HTTP status code (000 on connection failure).
+# curl prints %{http_code} (000 on connect/timeout failure) AND exits non-zero
+# on failure, so we capture its output and never append a second code. Anything
+# that isn't a clean 3-digit status normalizes to "000".
+# Args: <method> <url> <extra curl args...>
+_probe_http_code() {
+    local method="$1" url="$2"; shift 2
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X "$method" "$url" "$@" 2>/dev/null) || true
+    [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
+    printf '%s' "$code"
+}
+
+# probe_endpoint_health <account_num> -> 0 healthy, 1 unhealthy.
+probe_endpoint_health() {
+    local num="$1"
+    local base token_header model token
+    base=$(account_field "$num" "baseUrl")
+    token_header=$(account_field "$num" "tokenHeader" "api_key")
+    model=$(account_field "$num" "model" "claude-3-5-haiku-20241022")
+    token=$(endpoint_secret "$num")
+    [[ -z "$base" ]] && return 1
+
+    local -a auth=()
+    if [[ "$token_header" == "auth_token" ]]; then
+        auth=(-H "Authorization: Bearer $token")
+    else
+        auth=(-H "x-api-key: $token" -H "anthropic-version: 2023-06-01")
+    fi
+
+    # Step 1: GET /models.
+    local code cls
+    code=$(_probe_http_code GET "${base%/}/models" "${auth[@]}")
+    cls=$(_classify_probe_code "$code")
+    if [[ "$cls" == "unhealthy" ]]; then return 1; fi
+    if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then return 0; fi
+
+    # Step 2: /models was reachable but non-2xx (e.g. 404). Probe /messages.
+    code=$(_probe_http_code POST "${base%/}/messages" \
+        "${auth[@]}" \
+        -H "content-type: application/json" \
+        -H "anthropic-version: 2023-06-01" \
+        -d "{\"model\":\"$model\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}")
+    cls=$(_classify_probe_code "$code")
+    [[ "$cls" == "healthy" ]] && return 0 || return 1
 }
 
 # Fetch usage data from Anthropic OAuth Usage API
-# Writes to /tmp/claude-usage-cache.json with active_account field
+# Writes the usage cache (see usage_cache_file) with active_account field
 # Returns 0 on success, 1 on failure
 fetch_usage_data() {
-    local cache_file="/tmp/claude-usage-cache.json"
+    local cache_file; cache_file=$(usage_cache_file)
     local current_email
     current_email=$(get_current_account)
 
@@ -1835,7 +2232,7 @@ cmd_rate_check() {
     local hook_mode=false
     local refresh=false
     local max_age=""
-    local cache_file="/tmp/claude-usage-cache.json"
+    local cache_file; cache_file=$(usage_cache_file)
 
     # Parse flags
     while [[ $# -gt 0 ]]; do
@@ -1889,6 +2286,26 @@ cmd_rate_check() {
         max_age="${max_age:-$DEFAULT_CACHE_TTL}"
     fi
 
+    # Active account type decides how we judge "over threshold". Endpoints have
+    # no usage API, so they are probed reactively; oauth uses the usage cache.
+    local active_num over_threshold=false usage_int="n/a"
+    active_num=$(jq -r '.activeAccountNumber // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+
+    if [[ -n "$active_num" ]] && is_endpoint_account "$active_num"; then
+        if probe_endpoint_health "$active_num"; then
+            if [[ "$hook_mode" != true ]]; then
+                echo "Endpoint $(account_display_id "$active_num") healthy — OK"
+            fi
+            exit 0
+        fi
+        over_threshold=true
+        usage_int="unhealthy"
+        if [[ "$hook_mode" != true ]]; then
+            echo "Endpoint $(account_display_id "$active_num") is unavailable (probe failed)"
+        fi
+    fi
+
+    if [[ "$over_threshold" != true ]]; then
     local current_email
     current_email=$(get_current_account)
 
@@ -1927,7 +2344,7 @@ cmd_rate_check() {
     fi
 
     # Read utilization
-    local usage usage_int
+    local usage
     usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
     usage_int=$(printf "%.0f" "$usage" 2>/dev/null || echo "0")
 
@@ -1940,8 +2357,10 @@ cmd_rate_check() {
     fi
 
     # Above threshold
+    over_threshold=true
     if [[ "$hook_mode" != true ]]; then
         echo "Usage: ${usage_int}% exceeds threshold ${threshold}%"
+    fi
     fi
 
     if [[ "$auto_switch" == true ]]; then
@@ -1977,7 +2396,7 @@ cmd_rate_check() {
                 ($seq | index($active) // 0) as $idx |
                 $seq[($idx + 1) % ($seq | length)]
             ' "$SEQUENCE_FILE")
-            next_email=$(jq -r --arg num "$next_account" '.accounts[$num].email' "$SEQUENCE_FILE")
+            next_email=$(account_display_id "$next_account")
 
             # Perform switch in subshell to catch exit 1 from perform_switch
             if ! (CCS_SILENT=1 perform_switch "$next_account"); then
@@ -1989,30 +2408,29 @@ cmd_rate_check() {
                 exit 2
             fi
 
-            # Invalidate cache and re-fetch for new account
-            rm -f "$cache_file"
-            if fetch_usage_data; then
-                local new_usage new_usage_int
-                new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
-                new_usage_int=$(printf "%.0f" "$new_usage" 2>/dev/null || echo "0")
-
-                if [[ "$new_usage_int" -lt "$threshold" ]]; then
-                    # Successfully switched to an account under the threshold
-                    if [[ "$hook_mode" == true ]]; then
-                        _rate_hook_deny "Rate limit exceeded. Switched to Account-$next_account ($next_email). Please restart Claude Code."
-                        exit 0
-                    fi
-                    echo "Switched to Account-$next_account ($next_email) — usage: ${new_usage_int}%"
-                    handle_restart_after_switch
-                    exit 1
-                fi
+            # Verify the candidate by type: probe endpoints, usage-check oauth.
+            local healthy=false
+            if is_endpoint_account "$next_account"; then
+                if probe_endpoint_health "$next_account"; then healthy=true; fi
             else
-                # Can't verify new account's usage, assume it's OK
+                rm -f "$cache_file"
+                if fetch_usage_data; then
+                    local new_usage new_usage_int
+                    new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
+                    new_usage_int=$(printf "%.0f" "$new_usage" 2>/dev/null || echo "0")
+                    [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
+                else
+                    # Can't verify usage; assume OK (matches prior behavior).
+                    healthy=true
+                fi
+            fi
+
+            if [[ "$healthy" == true ]]; then
                 if [[ "$hook_mode" == true ]]; then
-                    _rate_hook_deny "Rate limit exceeded. Switched to Account-$next_account ($next_email). Please restart Claude Code."
+                    _rate_hook_deny "Switched to Account-$next_account ($next_email). Please restart Claude Code."
                     exit 0
                 fi
-                echo "Switched to Account-$next_account ($next_email) — could not verify usage"
+                echo "Switched to Account-$next_account ($next_email)"
                 handle_restart_after_switch
                 exit 1
             fi
@@ -2253,12 +2671,14 @@ show_usage() {
     echo ""
     echo "Account Management:"
     echo "  add                              Add current account to managed accounts"
-    echo "  rm <num|email>                   Remove account by number or email"
+    echo "  add-endpoint <label> --base-url <URL> [--model M] [--token-header api_key|auth_token]"
+    echo "                                   Add a custom ANTHROPIC_BASE_URL endpoint as an account"
+    echo "  rm <num|email|label>             Remove account by number, email, or endpoint label"
     echo "  ls                               List all managed accounts"
     echo ""
     echo "Switching:"
     echo "  sw                               Rotate to next account in sequence"
-    echo "  to <num|email|profile>           Switch to specific account"
+    echo "  to <num|email|profile|label>     Switch to specific account"
     echo ""
     echo "Profile Management:"
     echo "  profile <num|email> <name>       Set a friendly profile name for an account"
@@ -2268,8 +2688,8 @@ show_usage() {
     echo "  auto                             Switch based on current directory mapping"
     echo ""
     echo "Parallel / isolated accounts (CLAUDE_CONFIG_DIR):"
-    echo "  exec <num|email> -- <command>    Run a command as an account, isolated"
-    echo "  config-dir <num|email> [path]    Materialize an account's config dir, print it"
+    echo "  exec <num|email|label> -- <cmd>  Run a command as an account, isolated"
+    echo "  config-dir <num|email|label> [path]  Materialize an account's config dir, print it"
     echo ""
     echo "Rate Limiting:"
     echo "  rate-check [--threshold N]       Check if usage exceeds threshold"
@@ -2368,6 +2788,10 @@ main() {
     case "${1:-}" in
         add|--add-account)
             cmd_add_account
+            ;;
+        add-endpoint)
+            shift
+            cmd_add_endpoint "$@"
             ;;
         rm|--remove-account)
             shift
