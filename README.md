@@ -187,7 +187,7 @@ ccs rate-setup --disable         # Remove hook and disable
 
 **How it works:**
 
-1. The usage cache lives at `/tmp/claude-usage-cache.json` with a `cached_at` timestamp.
+1. The usage cache lives at `$TMPDIR/claude-usage-cache.json` (falling back to `/tmp` when `$TMPDIR`/`$TMP`/`$TEMP` are unset; override with `$CCS_USAGE_CACHE`) with a `cached_at` timestamp.
 2. Before each tool call the PreToolUse hook checks the cache. If it's fresh (younger than the TTL) and under threshold, it returns immediately (~20ms, no API call).
 3. If the cache is missing, stale, or for a different account, the hook refreshes it from the [Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage) on demand — so it works in headless `claude -p` runs with no statusline.
 4. If usage exceeds the threshold, it switches to the next account and tells Claude Code to deny the tool call with a "please restart" message.

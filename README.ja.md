@@ -186,12 +186,12 @@ ccs rate-setup --disable         # フックを削除して無効化
 
 **仕組み:**
 
-1. ステータスラインスクリプトが Anthropic Usage API を呼び出し、`/tmp/claude-usage-cache.json` にキャッシュ
+1. ステータスラインスクリプトが Anthropic Usage API を呼び出し、`$TMPDIR/claude-usage-cache.json`（`$TMPDIR`/`$TMP`/`$TEMP` 未設定時は `/tmp`、`$CCS_USAGE_CACHE` で上書き可）にキャッシュ
 2. ツール実行前に PreToolUse フックがキャッシュを読み取り（約20ms、API コールなし）
 3. 閾値を超過していれば次のアカウントに切り替え、Claude Code にツール実行を拒否＋「再起動してください」と通知
 4. すべてのエラーは fail open — フックの不具合でユーザーの作業がブロックされることはありません
 
-**前提条件:** `/tmp/claude-usage-cache.json` を定期更新するステータスラインスクリプトが必要です（[Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage) のデータ）。キャッシュには `five_hour.utilization`（0-100）が含まれている必要があります。
+**前提条件:** `$TMPDIR/claude-usage-cache.json`（未設定時は `/tmp`）を定期更新するステータスラインスクリプトが必要です（[Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage) のデータ）。キャッシュには `five_hour.utilization`（0-100）が含まれている必要があります。
 
 ### 診断
 

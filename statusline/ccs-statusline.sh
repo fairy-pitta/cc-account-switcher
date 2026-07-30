@@ -15,7 +15,15 @@ set -uo pipefail
 # shellcheck disable=SC2034
 INPUT=$(cat 2>/dev/null || true)
 
-CACHE_FILE="/tmp/claude-usage-cache.json"
+# Resolve the usage cache the same way ccswitch.sh's usage_cache_file() does so
+# writer (this script) and readers (rate hook, ccs) always agree: honor
+# $CCS_USAGE_CACHE, else the system temp dir ($TMPDIR/$TMP/$TEMP, else /tmp).
+if [[ -n "${CCS_USAGE_CACHE:-}" ]]; then
+    CACHE_FILE="$CCS_USAGE_CACHE"
+else
+    _cache_dir="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
+    CACHE_FILE="${_cache_dir%/}/claude-usage-cache.json"
+fi
 SEQ="$HOME/.claude-switch-backup/sequence.json"
 
 # Resolve ccs: 1) CCS_PATH env (set by statusline-setup), 2) sibling of this

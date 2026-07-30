@@ -546,9 +546,17 @@ readonly CCS_ENV_KEYS=("ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" "ANTHROPIC_AUTH_
 ccs_settings_file() { echo "$HOME/.claude/settings.json"; }
 
 # Path to the OAuth usage cache. Honors $CCS_USAGE_CACHE so tests can keep it in
-# their fixture instead of a host-global temp file.
+# their fixture instead of a host-global temp file. Otherwise it resolves the
+# system temp dir ($TMPDIR/$TMP/$TEMP, falling back to /tmp) so macOS, Linux,
+# WSL, and Git Bash all agree. The statusline (writer) and rate hook (reader)
+# resolve the same way — keep the three in sync.
 usage_cache_file() {
-    echo "${CCS_USAGE_CACHE:-/tmp/claude-usage-cache.json}"
+    if [[ -n "${CCS_USAGE_CACHE:-}" ]]; then
+        echo "$CCS_USAGE_CACHE"
+        return
+    fi
+    local cache_dir="${TMPDIR:-${TMP:-${TEMP:-/tmp}}}"
+    echo "${cache_dir%/}/claude-usage-cache.json"
 }
 
 # write_endpoint_env <base_url> <token_header: api_key|auth_token> <token> <model-or-empty>

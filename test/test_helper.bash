@@ -22,6 +22,11 @@ setup_test_env() {
     # Create .claude directory for config files
     mkdir -p "$HOME/.claude"
 
+    # Keep the usage cache inside the fixture so ccswitch, the statusline, and
+    # the rate hook all agree on the path and the suite stays hermetic (never
+    # touches a host-global temp file). Mirrors usage_cache_file()'s override.
+    export CCS_USAGE_CACHE="$TEST_HOME/claude-usage-cache.json"
+
     # Create mock bin directory and prepend to PATH
     MOCK_BIN="$TEST_HOME/.mock-bin"
     mkdir -p "$MOCK_BIN"
@@ -268,11 +273,11 @@ EOF
     security add-generic-password -U -s "Claude Code-Account-${account_num}-${email}" -a "$USER" -w "$creds"
 }
 
-# Helper: create a fake usage cache at /tmp/claude-usage-cache.json
+# Helper: create a fake usage cache at $CCS_USAGE_CACHE (the fixture cache path)
 create_fake_usage_cache() {
     local utilization="${1:-50}"
     local email="${2:-user1@example.com}"
-    cat > /tmp/claude-usage-cache.json <<EOF
+    cat > "$CCS_USAGE_CACHE" <<EOF
 {
   "five_hour": {
     "utilization": $utilization,
