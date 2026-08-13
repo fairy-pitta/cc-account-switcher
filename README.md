@@ -27,7 +27,7 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 - **Rollback** — Automatic rollback if a switch fails mid-way
 - **Rate limit auto-switch** — Automatically switch accounts when usage limits are hit, via Claude Code hooks
 - **Custom endpoints** — Add `ANTHROPIC_BASE_URL` + API key/token providers (OpenRouter, gateways, proxies, self-hosted) as switchable accounts via `ccs add-endpoint`
-- **Conversation handoff** — `--resume` carries your current conversation across a switch (fork-resume)
+- **Conversation handoff** — `--resume` carries your current conversation across a switch, forking it or continuing the same session (`ccs resume-mode`)
 - **Parallel isolation** — Run commands as a specific account in their own `CLAUDE_CONFIG_DIR` (`ccs exec` / `config-dir`; Linux/WSL)
 - **Diagnostics** — Health checks, status, and per-account usage statistics
 - **Cross-platform** — Works on macOS, Linux, and WSL
@@ -108,6 +108,7 @@ ccs -n sw                        # Dry-run: preview what would happen
 ccs sw -r                        # Switch and restart Claude Code
 ccs sw --no-restart              # Switch without restart prompt
 ccs to 2 --resume                # Switch to account 2 and resume the conversation
+ccs to 2 --resume --no-fork-session   # Resume without forking (keeps the session id)
 ```
 
 #### Resume your conversation after switching
@@ -119,14 +120,37 @@ carry your current conversation across the switch:
 ccs to 2 --resume
 ```
 
-This captures the current directory's most recent session and relaunches with
-`claude --resume <id> --fork-session`, so you continue the same conversation as the new
-account (in a freshly-forked session). If there's no prior conversation for the
-directory, it starts fresh.
+This captures the current directory's most recent session and relaunches Claude Code
+resuming it, so you continue the same conversation as the new account. If there's no
+prior conversation for the directory, it starts fresh.
 
-> **macOS note:** whether the forked session authenticates under the new account depends
+**Fork or same session.** There are two ways to come back into a conversation, and
+`--resume` can do either:
+
+| Mode | Relaunches with | Use it when |
+|------|-----------------|-------------|
+| `fork` (default) | `claude --resume <id> --fork-session` | You want the switched account to own a clean, isolated session. The fork gets a **new session id**. |
+| `same` | `claude --resume <id>` | You want to stay on one session id — so transcript watchers, orchestrators, and anything else keyed on the session keep following the same work trail. |
+
+Pick per switch, or set a default:
+
+```bash
+ccs to 2 --resume --fork-session      # force a fork for this switch
+ccs to 2 --resume --no-fork-session   # force same-session for this switch
+
+ccs resume-mode                       # show the current default
+ccs resume-mode same                  # default to same-session from now on
+ccs resume-mode fork                  # back to forking (the shipped default)
+```
+
+The default is stored as `.resume.mode` in `~/.claude-switch-backup/sequence.json`.
+Precedence is flag → stored default → `fork`. The same setting drives the message the
+rate-limit hook prints when it auto-switches (below).
+
+> **macOS note:** whether the resumed session authenticates under the new account depends
 > on Claude Code's session model. If it can't, the switch still succeeds and you land in
-> a fresh session.
+> a fresh session. Forking sidesteps this by creating a session the new account owns, so
+> `same` is the mode more likely to hit it.
 
 ### Custom endpoints
 
@@ -190,7 +214,7 @@ ccs rate-setup --disable         # Remove hook and disable
 1. The usage cache lives at `$TMPDIR/claude-usage-cache.json` (falling back to `/tmp` when `$TMPDIR`/`$TMP`/`$TEMP` are unset; override with `$CCS_USAGE_CACHE`) with a `cached_at` timestamp.
 2. Before each tool call the PreToolUse hook checks the cache. If it's fresh (younger than the TTL) and under threshold, it returns immediately (~20ms, no API call).
 3. If the cache is missing, stale, or for a different account, the hook refreshes it from the [Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage) on demand — so it works in headless `claude -p` runs with no statusline.
-4. If usage exceeds the threshold, it switches to the next account and tells Claude Code to deny the tool call with a "please restart" message.
+4. If usage exceeds the threshold, it switches to the next account and tells Claude Code to deny the tool call with a message naming the new account. A `PreToolUse` hook runs inside the live Claude Code process, so it can't relaunch it for you — instead the message hands you the exact command to come back with, honoring your resume mode: `Exit and run: claude --resume <id> --fork-session` (or without `--fork-session` when the mode is `same`). If the directory has no conversation to resume, it falls back to "Please restart Claude Code."
 5. Switches take an exclusive lock, so concurrent agents (e.g. an orchestrator's heartbeats) can't race or thrash accounts.
 6. All errors fail open — a broken hook never blocks your work.
 
