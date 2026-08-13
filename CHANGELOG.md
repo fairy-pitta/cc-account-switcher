@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ccs rate-setup` and `ccs statusline-setup` no longer fail with "Hook script not found at &lt;bindir&gt;/hooks/ccs-rate-hook.sh" on `make install` / Homebrew installs. Those installs put only the `ccs` binary in `<prefix>/bin`, so the scripts ccs ships are now installed to `<prefix>/share/ccswitch` and looked up there (and next to `ccswitch.sh`, for source checkouts and the npm package), from the invocation path first and the symlink-resolved path second — so an install reached through a stable link keeps a stable path in `settings.local.json` across upgrades. `$CCS_SHARE_DIR` overrides the search. `rate-setup` now fails without enabling the rate limit when no hook script can be found, instead of enabling it with no hook to enforce it
+- `rate-setup` / `statusline-setup` identify the entries they installed by script name rather than by full path, so re-running after a reinstall at a different prefix replaces the old entry instead of leaving a stale one behind. The match is anchored on a whole path element, so a third-party `my-ccs-rate-hook.sh` is never removed. Settings writes now go through the same validated, atomic write used elsewhere
+
 ## [0.5.0] - 2026-07-30
 
 ### Added
