@@ -154,6 +154,70 @@ MOCK_EOF
     [ "$active" -eq 2 ]
 }
 
+# Two accounts, a rotation-triggering usage cache, a curl mock that reports the
+# new account as healthy, and a conversation pointer for this directory — the
+# fixture the hook-mode deny message is built from.
+_setup_auto_switch_with_session() {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+    add_account_to_sequence "2" "user2@example.com" "uuid-2" "false"
+    create_fake_credentials "user1@example.com"
+    create_fake_usage_cache 90 "user1@example.com"
+
+    cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10,"limit":100,"used":10}}'
+echo "200"
+MOCK_EOF
+    chmod +x "$MOCK_BIN/curl"
+
+    local cfg updated
+    cfg="$HOME/.claude/.claude.json"
+    updated=$(jq --arg c "$PWD" '.projects[$c] = {lastSessionId: "sess-hook"}' "$cfg")
+    echo "$updated" > "$cfg"
+}
+
+@test "test_rate_check_hook_mode_auto_switch_reports_fork_resume_command" {
+    _setup_auto_switch_with_session
+
+    run run_ccswitch rate-check --auto-switch --hook-mode --threshold 80
+    [ "$status" -eq 0 ]
+    local reason
+    reason=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+    [[ "$reason" == *"claude --resume sess-hook --fork-session"* ]]
+}
+
+@test "test_rate_check_hook_mode_auto_switch_honors_same_resume_mode" {
+    _setup_auto_switch_with_session
+    local updated
+    updated=$(jq '.resume = {mode: "same"}' "$SEQUENCE_FILE")
+    echo "$updated" > "$SEQUENCE_FILE"
+
+    run run_ccswitch rate-check --auto-switch --hook-mode --threshold 80
+    [ "$status" -eq 0 ]
+    local reason
+    reason=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+    [[ "$reason" == *"claude --resume sess-hook"* ]]
+    [[ "$reason" != *"--fork-session"* ]]
+}
+
+@test "test_rate_check_hook_mode_auto_switch_falls_back_without_session" {
+    _setup_auto_switch_with_session
+    # Drop the conversation pointer: nothing to resume, so the message keeps the
+    # plain restart instruction.
+    local cfg updated
+    cfg="$HOME/.claude/.claude.json"
+    updated=$(jq '.projects = {}' "$cfg")
+    echo "$updated" > "$cfg"
+
+    run run_ccswitch rate-check --auto-switch --hook-mode --threshold 80
+    [ "$status" -eq 0 ]
+    local reason
+    reason=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+    [[ "$reason" == *"Please restart Claude Code."* ]]
+    [[ "$reason" != *"--resume"* ]]
+}
+
 @test "test_rate_check_auto_switch_all_limited_returns_3" {
     # Set up two accounts
     setup_fake_account "user1@example.com" "uuid-1"
