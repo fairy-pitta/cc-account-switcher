@@ -46,6 +46,7 @@ _ccswitch() {
         'profile:Set a friendly profile name for an account'
         'dir:Associate a directory with an account'
         'auto:Switch based on current directory mapping'
+        'resume-mode:Show or set how --resume relaunches (fork|same)'
         'check:Verify backup integrity (JSON, permissions, keychain)'
         'status:Show current account, token expiry, last switch'
         'stats:Show per-account usage statistics'
@@ -63,7 +64,7 @@ _ccswitch() {
                 cmd="${words[$i]}"
                 break
                 ;;
-            dir|--set-dir-account)
+            dir|--set-dir-account|resume-mode)
                 cmd="${words[$i]}"
                 break
                 ;;
@@ -73,6 +74,12 @@ _ccswitch() {
     case "$cmd" in
         to|--switch-to|rm|--remove-account|profile|--set-profile)
             _ccswitch_accounts
+            return
+            ;;
+        resume-mode)
+            _values 'resume mode' \
+                'fork[Fork the conversation into a new session]' \
+                'same[Continue the existing session]'
             return
             ;;
         dir|--set-dir-account)
