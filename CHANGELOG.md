@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Usage percentages are no longer read ten times too high under a locale whose decimal separator is a comma (`es_CL.UTF-8`, and most of Europe / Latin America). `printf "%.0f"` honors `LC_NUMERIC`: given the cache's dot-decimal `15.0` it printed `15` and then failed, and the `|| echo "0"` fallback — folded into the same command substitution — appended to that partial output, so 15% read as 150% and 100% as 1000%. The rate-limit hook consequently rotated through every account and denied tool calls with "Rate limit exceeded on all accounts (1000%)" on an account with plenty of headroom, and the statusline showed the same inflated number. The conversion now pins `LC_ALL=C`, keeps the fallback out of the substitution, and validates the result before comparing it against the threshold. A value that still can't be read is reported as unreadable rather than as 0% — `rate-check` exits 2 (fails open in hook mode) and the statusline renders `5h ?%`, so nothing acts on a number it can't trust ([#47](https://github.com/fairy-pitta/cc-account-switcher/issues/47))
+
 ## [0.5.0] - 2026-07-30
 
 ### Added
