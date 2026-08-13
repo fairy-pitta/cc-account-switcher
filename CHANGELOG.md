@@ -7,8 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [Unreleased]
-
 ### Added
 
 - Resume mode: `--resume` can now continue the **same** session instead of always forking a new one. `--no-fork-session` continues the captured session (`claude --resume <id>`), `--fork-session` forks it (`claude --resume <id> --fork-session`), and `ccs resume-mode [fork|same]` shows or sets the default, stored as `.resume.mode` in `sequence.json`. Precedence is flag → stored default → `fork`, so the shipped behaviour is unchanged. Same-session resume keeps one session id across the switch, which matters for transcript watchers, orchestrators, and anything else that follows a conversation by its id

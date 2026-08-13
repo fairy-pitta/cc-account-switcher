@@ -35,6 +35,24 @@ _ccswitch_directories() {
     _directories
 }
 
+# Global flags — accepted in any position, so they are offered wherever the word
+# being completed starts with a dash, and after a subcommand's own arguments.
+_ccswitch_options() {
+    local -a options
+    options=(
+        '-n:Show what would happen without making changes'
+        '--dry-run:Show what would happen without making changes'
+        '-r:Restart Claude Code after switching'
+        '--restart:Restart Claude Code after switching'
+        '--no-restart:Skip restart prompt after switching'
+        "--resume:Switch, then resume this directory's conversation"
+        '--fork-session:With --resume, fork into a new session (default)'
+        '--no-fork-session:With --resume, continue the same session'
+        '--allow-root:Allow running as root'
+    )
+    _describe -o 'option' options
+}
+
 _ccswitch() {
     local -a commands
     commands=(
@@ -56,8 +74,14 @@ _ccswitch() {
         'help:Show help message'
     )
 
+    # Flags come before, between, or after a subcommand's arguments.
+    if [[ "${words[CURRENT]}" == -* ]]; then
+        _ccswitch_options
+        return
+    fi
+
     # If we already have a command, complete its arguments
-    local cmd
+    local cmd i
     for (( i = 1; i < CURRENT; i++ )); do
         case "${words[$i]}" in
             to|--switch-to|rm|--remove-account|profile|--set-profile)
@@ -71,23 +95,36 @@ _ccswitch() {
         esac
     done
 
+    # Position of the word being completed, counted from the command itself
+    local arg_pos=$(( CURRENT - i ))
+
     case "$cmd" in
-        to|--switch-to|rm|--remove-account|profile|--set-profile)
-            _ccswitch_accounts
+        to|--switch-to|rm|--remove-account)
+            # A single account identifier; anything further is a global flag.
+            if (( arg_pos == 1 )); then
+                _ccswitch_accounts
+            else
+                _ccswitch_options
+            fi
+            return
+            ;;
+        profile|--set-profile)
+            # <account> <name> — the profile name is free-form, so offer nothing.
+            (( arg_pos == 1 )) && _ccswitch_accounts
             return
             ;;
         resume-mode)
-            _values 'resume mode' \
-                'fork[Fork the conversation into a new session]' \
-                'same[Continue the existing session]'
+            if (( arg_pos == 1 )); then
+                _values 'resume mode' \
+                    'fork[Fork the conversation into a new session]' \
+                    'same[Continue the existing session]'
+            fi
             return
             ;;
         dir|--set-dir-account)
-            # Position after the command itself
-            local arg_pos=$(( CURRENT - i ))
-            if [[ $arg_pos -eq 1 ]]; then
+            if (( arg_pos == 1 )); then
                 _ccswitch_directories
-            elif [[ $arg_pos -eq 2 ]]; then
+            elif (( arg_pos == 2 )); then
                 _ccswitch_accounts
             fi
             return
