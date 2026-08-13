@@ -545,6 +545,29 @@ readonly CCS_ENV_KEYS=("ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" "ANTHROPIC_AUTH_
 
 ccs_settings_file() { echo "$HOME/.claude/settings.json"; }
 
+# Where earlier versions installed the rate hook and the statusline. Claude Code
+# reads user-level settings from settings.json only: a settings.local.json is a
+# project-scoped file (<project>/.claude/settings.local.json), so entries written
+# to the one under ~/.claude never take effect. Kept so setup and --disable can
+# clear those inert entries out on the next run.
+ccs_legacy_settings_file() { echo "$HOME/.claude/settings.local.json"; }
+
+# Echo the contents of a settings file, or "{}" when it doesn't exist yet.
+# Fails closed on malformed JSON: rewriting the file from {} would drop unrelated
+# user settings, so the caller must abort instead.
+read_settings_or_fail() {
+    local file="$1"
+    if [[ ! -f "$file" ]]; then
+        echo '{}'
+        return 0
+    fi
+    if ! jq -e . "$file" >/dev/null 2>&1; then
+        echo "Error: invalid settings file at $file" >&2
+        return 1
+    fi
+    cat "$file"
+}
+
 # Absolute directory holding <path>. Pass --physical to resolve symlinked
 # directory components as well.
 _abs_dir() {
@@ -641,16 +664,8 @@ write_endpoint_env() {
     local file; file="$(ccs_settings_file)"
     mkdir -p "$(dirname "$file")"
 
-    local base='{}'
-    # Fail closed on a malformed settings.json: rewriting it from {} would drop
-    # unrelated user settings, so abort the switch instead.
-    if [[ -f "$file" ]]; then
-        if ! jq -e . "$file" >/dev/null 2>&1; then
-            echo "Error: invalid settings file at $file" >&2
-            return 1
-        fi
-        base=$(cat "$file")
-    fi
+    local base
+    base=$(read_settings_or_fail "$file") || return 1
 
     local token_var="ANTHROPIC_API_KEY"
     [[ "$token_header" == "auth_token" ]] && token_var="ANTHROPIC_AUTH_TOKEN"
@@ -2569,6 +2584,57 @@ _rate_hook_uninstall() {
     fi
 }
 
+# Remove the statusLine we installed from a settings file, leaving a statusline
+# the user installed themselves alone.
+_statusline_uninstall() {
+    local settings_file="$1"
+    [[ -f "$settings_file" ]] || return 0
+
+    local cleaned
+    cleaned=$(jq --arg name "ccs-statusline.sh" "$CCS_OWNED_JQ"'
+        if (.statusLine.command | ccs_owned($name))
+        then del(.statusLine) else . end
+    ' "$settings_file" 2>/dev/null) || return 0
+
+    if [[ -n "$cleaned" ]]; then
+        write_json "$settings_file" "$cleaned"
+    fi
+    return 0
+}
+
+# Clear whatever an earlier version installed into the legacy settings file, so
+# an upgrade doesn't leave a second, inert definition behind. <what> is "hook" or
+# "statusline". Says so once when it actually removed something.
+_clear_legacy_settings() {
+    local what="$1" legacy found
+    legacy="$(ccs_legacy_settings_file)"
+    [[ -f "$legacy" ]] || return 0
+
+    case "$what" in
+        hook)
+            found=$(jq -r --arg name "ccs-rate-hook.sh" "$CCS_OWNED_JQ"'
+                [ (.hooks.PreToolUse // [])[]
+                  | .command, ((.hooks // [])[] | .command) ]
+                | map(ccs_owned($name)) | any
+            ' "$legacy" 2>/dev/null) || return 0
+            [[ "$found" == "true" ]] || return 0
+            _rate_hook_uninstall "$legacy"
+            ;;
+        statusline)
+            found=$(jq -r --arg name "ccs-statusline.sh" "$CCS_OWNED_JQ"'
+                .statusLine.command | ccs_owned($name)
+            ' "$legacy" 2>/dev/null) || return 0
+            [[ "$found" == "true" ]] || return 0
+            _statusline_uninstall "$legacy"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    echo "Removed the stale entry in $legacy (Claude Code doesn't read that file)."
+}
+
 # Rate limit auto-switch setup
 # Usage: ccs rate-setup [--threshold N] [--disable]
 cmd_rate_setup() {
@@ -2594,7 +2660,7 @@ cmd_rate_setup() {
     setup_directories
     init_sequence_file
 
-    local settings_file="$HOME/.claude/settings.local.json"
+    local settings_file; settings_file="$(ccs_settings_file)"
 
     if [[ "$disable" == true ]]; then
         # Disable: update config and remove hook
@@ -2603,6 +2669,7 @@ cmd_rate_setup() {
         write_json "$SEQUENCE_FILE" "$updated"
 
         _rate_hook_uninstall "$settings_file"
+        _clear_legacy_settings hook
 
         echo "Rate limit auto-switch disabled."
         echo "Hook removed from $settings_file"
@@ -2614,6 +2681,9 @@ cmd_rate_setup() {
     local hook_script
     hook_script="$(ccs_shipped_script "hooks/ccs-rate-hook.sh")" || return 1
 
+    # Same reason: a settings file we can't parse is one we can't install into.
+    read_settings_or_fail "$settings_file" >/dev/null || return 1
+
     # Enable: update config
     local updated
     updated=$(jq --argjson thresh "$threshold" '
@@ -2621,7 +2691,7 @@ cmd_rate_setup() {
     ' "$SEQUENCE_FILE" 2>/dev/null)
     write_json "$SEQUENCE_FILE" "$updated"
 
-    # Install hook into settings.local.json
+    # Install the hook into the user settings Claude Code reads.
     mkdir -p "$(dirname "$settings_file")"
     if [[ ! -f "$settings_file" ]]; then
         echo '{}' > "$settings_file"
@@ -2636,6 +2706,7 @@ cmd_rate_setup() {
     # keeps repeated runs idempotent and also repairs entries left behind by an
     # earlier install at a different path.
     _rate_hook_uninstall "$settings_file"
+    _clear_legacy_settings hook
 
     # Write the Claude Code hook schema: a matcher entry containing a nested
     # "hooks" array of command handlers. matcher "" matches all tools.
@@ -2662,13 +2733,17 @@ cmd_rate_setup() {
 }
 
 # Install (or remove) the statusline that shows usage and keeps the cache warm.
-# Usage: ccs statusline-setup [--disable]
+# Usage: ccs statusline-setup [--force] [--disable]
 cmd_statusline_setup() {
-    local disable=false
+    local disable=false force=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --disable)
                 disable=true
+                shift
+                ;;
+            --force)
+                force=true
                 shift
                 ;;
             *)
@@ -2677,21 +2752,14 @@ cmd_statusline_setup() {
         esac
     done
 
-    local settings_file="$HOME/.claude/settings.local.json"
+    local settings_file; settings_file="$(ccs_settings_file)"
 
     if [[ "$disable" == true ]]; then
-        # Only remove the statusLine if it's ours, so we never clobber a user's
-        # own statusline.
-        if [[ -f "$settings_file" ]]; then
-            local cleaned
-            cleaned=$(jq --arg name "ccs-statusline.sh" "$CCS_OWNED_JQ"'
-                if (.statusLine.command | ccs_owned($name))
-                then del(.statusLine) else . end
-            ' "$settings_file" 2>/dev/null) || cleaned=""
-            if [[ -n "$cleaned" ]]; then
-                write_json "$settings_file" "$cleaned"
-            fi
-        fi
+        # Only removes the statusLine if it's ours, so a user's own statusline
+        # is never clobbered.
+        _statusline_uninstall "$settings_file"
+        _clear_legacy_settings statusline
+
         echo "ccs statusline disabled."
         echo "Settings: $settings_file"
         return
@@ -2699,6 +2767,8 @@ cmd_statusline_setup() {
 
     local statusline_script
     statusline_script="$(ccs_shipped_script "statusline/ccs-statusline.sh")" || return 1
+
+    read_settings_or_fail "$settings_file" >/dev/null || return 1
 
     mkdir -p "$(dirname "$settings_file")"
     [[ -f "$settings_file" ]] || echo '{}' > "$settings_file"
@@ -2708,16 +2778,26 @@ cmd_statusline_setup() {
     ccs_bin="$(ccs_invoked_path)"
     sl_command="CCS_PATH=${ccs_bin} ${statusline_script}"
 
-    # Warn (but proceed) when we're replacing someone else's statusline.
+    # A statusline that isn't ours is the user's own: settings.json is where they
+    # configure Claude Code, so overwriting it takes an explicit --force.
     local foreign
     foreign=$(jq -r --arg name "ccs-statusline.sh" "$CCS_OWNED_JQ"'
         if (.statusLine.command | ccs_owned($name))
         then empty else .statusLine.command // empty end
     ' "$settings_file" 2>/dev/null || true)
+    if [[ -n "$foreign" && "$force" != true ]]; then
+        echo "Error: $settings_file already sets a statusLine:" >&2
+        echo "  $foreign" >&2
+        echo "Re-run with --force to replace it, or call" >&2
+        echo "$statusline_script from your own statusline script to keep both." >&2
+        return 1
+    fi
     if [[ -n "$foreign" ]]; then
         echo "Note: replacing an existing statusLine command:"
         echo "  was: $foreign"
     fi
+
+    _clear_legacy_settings statusline
 
     local with_sl
     with_sl=$(jq --arg cmd "$sl_command" '
@@ -2761,7 +2841,7 @@ show_usage() {
     echo "  rate-check [--threshold N]       Check if usage exceeds threshold"
     echo "  rate-setup [--threshold N]       Install PreToolUse hook for auto-switch"
     echo "  rate-setup --disable             Remove hook and disable auto-switch"
-    echo "  statusline-setup                 Install statusline (shows usage, keeps cache warm)"
+    echo "  statusline-setup [--force]       Install statusline (shows usage, keeps cache warm)"
     echo "  statusline-setup --disable       Remove the ccs statusline"
     echo ""
     echo "Diagnostics:"
