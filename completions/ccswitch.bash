@@ -33,9 +33,13 @@ _ccswitch() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     # All available subcommands and options
-    local commands="add rm ls sw to profile dir auto rate-check rate-setup check status stats version help -n -r --dry-run --restart --no-restart"
+    local commands="add rm ls sw to profile dir auto resume-mode rate-check rate-setup check status stats version help -n -r --dry-run --restart --no-restart --resume --fork-session --no-fork-session"
 
     case "$prev" in
+        resume-mode)
+            COMPREPLY=($(compgen -W "fork same" -- "$cur"))
+            return 0
+            ;;
         to|--switch-to|rm|--remove-account|profile|--set-profile)
             # Complete with account numbers and emails
             local accounts

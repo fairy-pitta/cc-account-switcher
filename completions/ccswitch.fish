@@ -19,7 +19,7 @@ function __ccs_needs_command
     set -l cmd (commandline -opc)
     for c in $cmd[2..-1]
         switch $c
-            case 'add' 'rm' 'ls' 'sw' 'to' 'profile' 'dir' 'auto' \
+            case 'add' 'rm' 'ls' 'sw' 'to' 'profile' 'dir' 'auto' 'resume-mode' \
                  'rate-check' 'rate-setup' 'check' 'status' 'stats' 'version' 'help'
                 return 1
         end
@@ -53,6 +53,7 @@ complete -c ccs -n '__ccs_needs_command' -a 'auto' -d 'Switch based on current d
 complete -c ccs -n '__ccs_needs_command' -a 'check' -d 'Check account configuration health'
 complete -c ccs -n '__ccs_needs_command' -a 'status' -d 'Show current account status'
 complete -c ccs -n '__ccs_needs_command' -a 'stats' -d 'Show account usage statistics'
+complete -c ccs -n '__ccs_needs_command' -a 'resume-mode' -d 'Show or set how --resume relaunches'
 complete -c ccs -n '__ccs_needs_command' -a 'rate-check' -d 'Check if usage exceeds rate limit'
 complete -c ccs -n '__ccs_needs_command' -a 'rate-setup' -d 'Install/remove auto-switch hook'
 complete -c ccs -n '__ccs_needs_command' -a 'version' -d 'Show version information'
@@ -62,6 +63,13 @@ complete -c ccs -n '__ccs_needs_command' -a 'help' -d 'Show help message'
 complete -c ccs -s n -l dry-run -d 'Preview changes without applying'
 complete -c ccs -s r -l restart -d 'Restart Claude Code after switching'
 complete -c ccs -l no-restart -d 'Skip Claude Code restart after switch'
+complete -c ccs -l resume -d "Switch, then resume this directory's conversation"
+complete -c ccs -l fork-session -d 'With --resume: fork into a new session (default)'
+complete -c ccs -l no-fork-session -d 'With --resume: continue the same session'
+
+# Resume mode values
+complete -c ccs -n '__ccs_using_command resume-mode' -f -a 'fork' -d 'Fork the conversation into a new session'
+complete -c ccs -n '__ccs_using_command resume-mode' -f -a 'same' -d 'Continue the existing session'
 
 # Account completions for commands that take account identifiers
 complete -c ccs -n '__ccs_using_command to' -f -a '(__ccs_accounts)'

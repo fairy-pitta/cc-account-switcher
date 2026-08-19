@@ -27,7 +27,7 @@ macOS・Linux・WSL で複数の Claude Code アカウントを簡単に管理�
 - **ロールバック** — 切り替え途中で失敗した場合は自動でロールバック
 - **レート制限自動切り替え** — 使用量が上限に達したら自動的にアカウントを切り替え（Claude Code フック連携）
 - **カスタムエンドポイント** — `ANTHROPIC_BASE_URL` と API キー／トークン型プロバイダー（OpenRouter・ゲートウェイ・プロキシ・セルフホスト）を `ccs add-endpoint` で切り替え可能なアカウントとして追加
-- **会話の引き継ぎ** — `--resume` で、切り替え後も現在の会話をそのまま継続（fork-resume）
+- **会話の引き継ぎ** — `--resume` で、切り替え後も現在の会話をそのまま継続。fork するか同一セッションのまま続けるかを選択可能（`ccs resume-mode`）
 - **並列分離** — 指定アカウントを専用の `CLAUDE_CONFIG_DIR` で実行（`ccs exec` / `config-dir`、Linux/WSL）
 - **診断機能** — ヘルスチェック、ステータス確認、アカウントごとの使用統計
 - **クロスプラットフォーム** — macOS・Linux・WSL に対応
@@ -108,6 +108,7 @@ ccs -n sw                        # ドライラン：変更内容をプレビュ
 ccs sw -r                        # 切り替えて Claude Code を再起動
 ccs sw --no-restart              # 再起動プロンプトなしで切り替え
 ccs to 2 --resume                # アカウント 2 に切り替えて会話を再開
+ccs to 2 --resume --no-fork-session   # fork せずに再開（セッション ID を維持）
 ```
 
 #### 切り替え後に会話を再開する
@@ -119,13 +120,36 @@ ccs to 2 --resume                # アカウント 2 に切り替えて会話を
 ccs to 2 --resume
 ```
 
-カレントディレクトリの直近セッションを捕捉し、`claude --resume <id> --fork-session`
-で起動し直すため、新しいアカウントで同じ会話を継続できます（fork された新規セッション
-として）。そのディレクトリに会話履歴がなければ、新規セッションで起動します。
+カレントディレクトリの直近セッションを捕捉して再開するため、新しいアカウントで同じ会話
+を継続できます。そのディレクトリに会話履歴がなければ、新規セッションで起動します。
 
-> **macOS の注意：** fork したセッションが新アカウントで認証できるかは Claude Code の
+**fork するか、同一セッションのままか。** 会話への戻り方は 2 通りあり、`--resume` は
+どちらにも対応します：
+
+| モード | 起動コマンド | 用途 |
+|--------|--------------|------|
+| `fork`（デフォルト） | `claude --resume <id> --fork-session` | 切り替え先アカウントが所有する、独立したクリーンなセッションが欲しいとき。fork では**新しいセッション ID** が発行されます。 |
+| `same` | `claude --resume <id>` | セッション ID を維持したいとき。トランスクリプト監視ツールやオーケストレーターなど、セッション ID を追跡する仕組みが同じ作業履歴を追い続けられます。 |
+
+切り替えごとに指定するか、デフォルトを設定します：
+
+```bash
+ccs to 2 --resume --fork-session      # この切り替えでは fork する
+ccs to 2 --resume --no-fork-session   # この切り替えでは同一セッションで再開
+
+ccs resume-mode                       # 現在のデフォルトを表示
+ccs resume-mode same                  # 以後は同一セッションをデフォルトに
+ccs resume-mode fork                  # fork（出荷時のデフォルト）に戻す
+```
+
+デフォルトは `~/.claude-switch-backup/sequence.json` の `.resume.mode` に保存されます。
+優先順位はフラグ → 保存されたデフォルト → `fork` です。この設定は、レート制限フックが
+自動切り替えしたときに表示するメッセージにも適用されます（後述）。
+
+> **macOS の注意：** 再開したセッションが新アカウントで認証できるかは Claude Code の
 > セッション仕様に依存します。認証できない場合でも切り替え自体は成功し、新規セッション
-> で起動します。
+> で起動します。fork は新アカウントが所有するセッションを作ることでこれを回避するため、
+> この問題に当たりやすいのは `same` モードです。
 
 ### カスタムエンドポイント
 
@@ -190,7 +214,7 @@ ccs rate-setup --disable         # フックを削除して無効化
 
 1. ステータスラインスクリプトが Anthropic Usage API を呼び出し、`$TMPDIR/claude-usage-cache.json`（`$TMPDIR`/`$TMP`/`$TEMP` 未設定時は `/tmp`、`$CCS_USAGE_CACHE` で上書き可）にキャッシュ
 2. ツール実行前に PreToolUse フックがキャッシュを読み取り（約20ms、API コールなし）
-3. 閾値を超過していれば次のアカウントに切り替え、Claude Code にツール実行を拒否＋「再起動してください」と通知
+3. 閾値を超過していれば次のアカウントに切り替え、Claude Code にツール実行を拒否させ、新しいアカウント名を通知。PreToolUse フックは実行中の Claude Code プロセス内で動くため再起動はできず、代わりに resume モードに従った復帰コマンド（`Exit and run: claude --resume <id> --fork-session`、`same` モードでは `--fork-session` なし）を提示します。再開できる会話がなければ「再起動してください」にフォールバックします
 4. すべてのエラーは fail open — フックの不具合でユーザーの作業がブロックされることはありません
 
 **前提条件:** `$TMPDIR/claude-usage-cache.json`（未設定時は `/tmp`）を定期更新するステータスラインスクリプトが必要です（[Anthropic OAuth Usage API](https://api.anthropic.com/api/oauth/usage) のデータ）。キャッシュには `five_hour.utilization`（0-100）が含まれている必要があります。

@@ -25,8 +25,9 @@ readonly DEFAULT_CACHE_TTL=60
 # Global flags (set during argument parsing)
 DRY_RUN=false
 RESTART_FLAG=""  # "", "restart", or "no-restart"
-RESUME_AFTER=false  # true when --resume: fork-resume the conversation after switching
+RESUME_AFTER=false  # true when --resume: resume the conversation after switching
 RESUME_SID=""       # captured lastSessionId for $PWD, set before the switch
+RESUME_MODE=""      # "fork", "same", or "" to resolve from config (see resume_mode)
 # Allow running as root. Defaults from CCSWITCH_ALLOW_ROOT (1/true to enable),
 # can also be set with the --allow-root flag.
 if [[ "${CCSWITCH_ALLOW_ROOT:-}" == "1" || "${CCSWITCH_ALLOW_ROOT:-}" == "true" ]]; then
@@ -806,14 +807,37 @@ kill_claude_processes() {
     fi
 }
 
-# Build the relaunch command for a fork-resume restart.
-# Args: <claude_bin> <session_id>. With a session id -> resume+fork; without -> fresh.
+# Resolve how --resume relaunches: "fork" forks the conversation into a new
+# session id, "same" continues the existing one (so tools that follow a session
+# keep tracking it). Precedence: --fork-session/--no-fork-session flag, then
+# .resume.mode in sequence.json, then "fork". An unrecognized stored value falls
+# back to the default rather than failing the switch.
+resume_mode() {
+    if [[ "$RESUME_MODE" == "fork" || "$RESUME_MODE" == "same" ]]; then
+        echo "$RESUME_MODE"
+        return
+    fi
+    local configured=""
+    if [[ -f "$SEQUENCE_FILE" ]]; then
+        configured=$(jq -r '.resume.mode // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    fi
+    case "$configured" in
+        fork|same) echo "$configured" ;;
+        *) echo "fork" ;;
+    esac
+}
+
+# Build the relaunch command for a resume restart.
+# Args: <claude_bin> <session_id> [mode]. With a session id -> resume, forking
+# only in "fork" mode; without one -> fresh. Mode defaults to the resolved one.
 build_resume_command() {
-    local bin="$1" sid="$2"
-    if [[ -n "$sid" ]]; then
+    local bin="$1" sid="$2" mode="${3:-$(resume_mode)}"
+    if [[ -z "$sid" ]]; then
+        printf '%s' "$bin"
+    elif [[ "$mode" == "fork" ]]; then
         printf '%s --resume %s --fork-session' "$bin" "$sid"
     else
-        printf '%s' "$bin"
+        printf '%s --resume %s' "$bin" "$sid"
     fi
 }
 
@@ -826,14 +850,16 @@ capture_resume_session_id() {
     jq -r --arg c "$PWD" '.projects[$c].lastSessionId // empty' "$cfg" 2>/dev/null || true
 }
 
-# Foreground relaunch that fork-resumes the captured conversation under the
-# now-active account. Falls back to a fresh launch when there is no session id.
+# Foreground relaunch that resumes the captured conversation under the
+# now-active account, forking it or continuing it in place depending on the
+# resolved mode. Falls back to a fresh launch when there is no session id.
 restart_claude_code_resume() {
-    local sid="$1" bin
+    local sid="$1" bin mode
+    mode=$(resume_mode)
     bin=$(command -v claude 2>/dev/null || echo "")
     if [[ -z "$bin" || ! -x "$bin" ]]; then
         echo "Switched. 'claude' not found in PATH — resume manually:"
-        echo "  $(build_resume_command claude "$sid")"
+        echo "  $(build_resume_command claude "$sid" "$mode")"
         return 0
     fi
     kill_claude_processes
@@ -841,12 +867,15 @@ restart_claude_code_resume() {
     # exec would terminate the user's shell, so fall back to a clear message.
     if [[ ! -x "$bin" ]]; then
         echo "Error: '$bin' is no longer executable — resume manually:"
-        echo "  $(build_resume_command claude "$sid")"
+        echo "  $(build_resume_command claude "$sid" "$mode")"
         return 1
     fi
-    if [[ -n "$sid" ]]; then
+    if [[ -n "$sid" && "$mode" == "fork" ]]; then
         echo "Resuming conversation under the new account (forked session)..."
         exec "$bin" --resume "$sid" --fork-session
+    elif [[ -n "$sid" ]]; then
+        echo "Resuming conversation under the new account (same session)..."
+        exec "$bin" --resume "$sid"
     else
         echo "No previous conversation found for this directory — starting fresh."
         exec "$bin"
@@ -2504,6 +2533,13 @@ cmd_rate_check() {
             exit 3
         fi
 
+        # Capture this directory's conversation pointer BEFORE any switch rewrites
+        # .claude.json. Running as a PreToolUse hook we're a child of the live
+        # Claude Code process and can't relaunch it, so the deny message hands the
+        # user the exact command to resume with once they exit.
+        local resume_sid
+        resume_sid=$(capture_resume_session_id)
+
         # Try switching to next accounts (up to N-1 attempts)
         local attempts=0
         local max_attempts=$((total_accounts - 1))
@@ -2551,7 +2587,11 @@ cmd_rate_check() {
 
             if [[ "$healthy" == true ]]; then
                 if [[ "$hook_mode" == true ]]; then
-                    _rate_hook_deny "Switched to Account-$next_account ($next_email). Please restart Claude Code."
+                    local next_step="Please restart Claude Code."
+                    if [[ -n "$resume_sid" ]]; then
+                        next_step="Exit and run: $(build_resume_command claude "$resume_sid")"
+                    fi
+                    _rate_hook_deny "Switched to Account-$next_account ($next_email). $next_step"
                     exit 0
                 fi
                 echo "Switched to Account-$next_account ($next_email)"
@@ -2579,12 +2619,50 @@ cmd_rate_check() {
     exit 1
 }
 
-# Output hook-protocol JSON to deny a tool call
+# Output hook-protocol JSON to deny a tool call. jq does the encoding: the reason
+# carries account labels and session ids, which must not be able to break the JSON.
 _rate_hook_deny() {
-    local reason="$1"
-    cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"$reason"}}
-EOF
+    jq -cn --arg reason "$1" '{
+        hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: $reason
+        }
+    }'
+}
+
+# Show or set the default resume mode used by --resume (and reported by the rate
+# hook). "fork" starts a new session id from the old transcript; "same" continues
+# the existing session, so tools keyed on the session id keep following the work.
+# Usage: ccs resume-mode [fork|same]
+cmd_resume_mode() {
+    local mode="${1:-}"
+
+    if [[ -z "$mode" ]]; then
+        echo "Resume mode: $(resume_mode)"
+        return
+    fi
+
+    if [[ "$mode" != "fork" && "$mode" != "same" ]]; then
+        echo "Error: invalid resume mode '$mode' (expected 'fork' or 'same')" >&2
+        exit 1
+    fi
+
+    setup_directories
+    init_sequence_file
+
+    local updated
+    updated=$(jq --arg mode "$mode" '.resume = ((.resume // {}) | .mode = $mode)' "$SEQUENCE_FILE") || {
+        echo "Error: could not update $SEQUENCE_FILE" >&2
+        exit 1
+    }
+    write_json "$SEQUENCE_FILE" "$updated"
+
+    if [[ "$mode" == "fork" ]]; then
+        echo "Resume mode set to 'fork' — --resume forks into a new session."
+    else
+        echo "Resume mode set to 'same' — --resume continues the same session."
+    fi
 }
 
 # Remove the PreToolUse hook we installed from a settings file, leaving any hook
@@ -2862,6 +2940,9 @@ show_usage() {
     echo "Profile Management:"
     echo "  profile <num|email> <name>       Set a friendly profile name for an account"
     echo ""
+    echo "Conversation Handoff:"
+    echo "  resume-mode [fork|same]          Show or set how --resume relaunches"
+    echo ""
     echo "Directory-based Switching:"
     echo "  dir [dir] <num|email|profile>    Associate a directory with an account"
     echo "  auto                             Switch based on current directory mapping"
@@ -2886,7 +2967,9 @@ show_usage() {
     echo "  -n, --dry-run                    Show what would happen without making changes"
     echo "  -r, --restart                    Restart Claude Code after switching"
     echo "  --no-restart                     Skip restart prompt after switching"
-    echo "  --resume                         Switch, then fork-resume this directory's conversation"
+    echo "  --resume                         Switch, then resume this directory's conversation"
+    echo "  --fork-session                   With --resume: fork into a new session (default)"
+    echo "  --no-fork-session                With --resume: continue the same session"
     echo "  --allow-root                     Allow running as root (or set CCSWITCH_ALLOW_ROOT=1)"
     echo "  version                          Show version number"
     echo "  help                             Show this help message"
@@ -2901,6 +2984,8 @@ show_usage() {
     echo "  ccs -n sw                                  # Preview switch"
     echo "  ccs sw -r                                  # Switch and restart Claude Code"
     echo "  ccs to 2 --resume                          # Switch to account 2 and resume the conversation"
+    echo "  ccs to 2 --resume --no-fork-session        # Resume without forking (keeps the session id)"
+    echo "  ccs resume-mode same                       # Make same-session the default for --resume"
     echo "  ccs profile 1 work                         # Name account 1 'work'"
     echo "  ccs dir ~/work 1                           # Map ~/work to account 1"
     echo "  ccs auto                                   # Switch based on current directory"
@@ -2926,6 +3011,14 @@ main() {
                 ;;
             --resume)
                 RESUME_AFTER=true
+                shift
+                ;;
+            --fork-session)
+                RESUME_MODE="fork"
+                shift
+                ;;
+            --no-fork-session)
+                RESUME_MODE="same"
                 shift
                 ;;
             --no-restart)
@@ -3004,6 +3097,10 @@ main() {
         config-dir)
             shift
             cmd_config_dir "$@"
+            ;;
+        resume-mode)
+            shift
+            cmd_resume_mode "$@"
             ;;
         rate-check)
             shift
