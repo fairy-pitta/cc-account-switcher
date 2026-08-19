@@ -2394,12 +2394,13 @@ _rate_threshold() {
 #          2 switch error; 3 lost race (someone else already rotated).
 _rotate_to_healthy_next_account() {
     local expected_active="$1"
+    local threshold="${2:-}"
     local total_accounts
     total_accounts=$(jq '.sequence | length' "$SEQUENCE_FILE" 2>/dev/null || echo "0")
     [[ "$total_accounts" -lt 2 ]] && return 1
 
-    local threshold cache_file
-    threshold=$(_rate_threshold)
+    local cache_file
+    [[ -z "$threshold" ]] && threshold="$(_rate_threshold)"
     cache_file=$(usage_cache_file)
 
     local attempts=0 max_attempts=$((total_accounts - 1))
@@ -2626,7 +2627,7 @@ cmd_rate_check() {
         resume_sid=$(capture_resume_session_id)
 
         local hrc=0
-        _rotate_to_healthy_next_account "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" || hrc=$?
+        _rotate_to_healthy_next_account "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" "$threshold" || hrc=$?
 
         case "$hrc" in
             0)
