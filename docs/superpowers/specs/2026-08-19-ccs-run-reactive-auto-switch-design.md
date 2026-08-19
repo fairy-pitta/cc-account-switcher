@@ -286,3 +286,15 @@ to assert replay); and sleep (for timeout/signal). Cases:
   available; the pattern list is intentionally easy to extend.
 - Consider spooling stdin under the ccs config dir (stricter than `TMPDIR`) if
   prompt-on-disk sensitivity warrants it.
+
+## 17. Implementation notes / deviations (2026-08-19, post-review)
+
+Recorded after independent reviews (opus, Fable, Codex) of the implemented branch:
+
+- **stderr is buffered, not streamed live.** §6 step 3 / §11 describe live stderr; the implementation buffers stderr per attempt and replays it (`cat "$err_buf" >&2`) after the attempt, to keep detection's grep deterministic (a `tee` process-substitution raced the read). The inactivity-timeout caveat in §11 therefore applies to stderr too. Live streaming via `tee` is a possible follow-up.
+- **Exhausted stdout is discarded.** §6 step 6 says "emit last buffered stdout" on all-exhausted; §11 says failed attempts' stdout is discarded. The implementation follows §11 (only the successful attempt's stdout is emitted). §6 step 6 is superseded.
+- **New exit code 4 (`--max-attempts` reached).** Distinct from 3 (all-exhausted): the loop hit the attempt cap after rotating to a healthy account it never retried. Prints `ccs-run: max-attempts accounts=N attempts=M`. Added so orchestrators don't treat "ran out of attempts" as "all accounts exhausted".
+- **`--no-stdin` + stdin bounding.** The spool reads stdin to EOF up front, which deadlocks when an unused-but-inherited pipe stays open. Mitigations: `--no-stdin` (skip spool, child gets `/dev/null`); a tty stdin also gets `/dev/null` (a `set -m` child on a tty would hit SIGTTIN); and `--timeout` bounds the spool read.
+- **Jittered backoff** (`sleep 0.$((RANDOM%5))`) runs between ccs-level retries (spec §6 storm-avoidance).
+- **`CLAUDE_CODE_RETRY_WATCHDOG` is best-effort.** §9's confidence is unwarranted — the variable is undocumented and may be a no-op on some Claude Code versions (the documented stream watchdog is `CLAUDE_ENABLE_STREAM_WATCHDOG`). `CLAUDE_CODE_MAX_RETRIES` is honored; `--timeout` is the authoritative bound on runaway internal backoff.
+- **Deferred (follow-up):** live stderr streaming; TERM→KILL escalation for a child ignoring SIGTERM; killing the watchdog's `sleep` on a fast success; a single EXIT trap to collapse the repeated cleanup calls.
