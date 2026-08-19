@@ -1730,6 +1730,7 @@ cmd_switch_to() {
 # Perform the actual account switch
 perform_switch() {
     local target_account="$1"
+    local expected_active="${2:-}"
 
     # Get current and target account info
     local current_account target_email current_email
@@ -1804,6 +1805,18 @@ perform_switch() {
             fi
             current_account="$real_current_account"
         fi
+    fi
+
+    # Compare-and-swap precondition (used by `ccs run`): only switch if the
+    # reconciled active account is still the one the caller expected. Under
+    # concurrency another switch may have already rotated the shared account;
+    # signal that with a distinct status so the caller retries without rotating.
+    # Placed AFTER reconcile (so drift can't give a false verdict) and BEFORE the
+    # no-op guard (so a concurrent switch onto our target isn't misread as our
+    # success). Release the lock first, like every other post-acquire early exit.
+    if [[ -n "$expected_active" && "$current_account" != "$expected_active" ]]; then
+        release_switch_lock
+        return 3
     fi
 
     # No-op guard: if we're already on the target (e.g. a concurrent switch beat

@@ -314,6 +314,16 @@ run_ccswitch() {
     run_ccswitch_at "$CCSWITCH_SCRIPT" "$@"
 }
 
+# Invoke perform_switch directly with args, in a subshell, capturing its return
+# code (perform_switch fails via `exit 1`, so it must run in a subshell).
+run_ccswitch_perform_switch() {
+    HOME="$TEST_HOME" PATH="$MOCK_BIN:$ORIGINAL_PATH" /bin/bash -c '
+        set -e
+        source "'"$CCSWITCH_SCRIPT"'"
+        CCS_SILENT=1 perform_switch "$@"
+    ' _ "$@"
+}
+
 # Build an install layout under <prefix> and echo the path of its ccs binary.
 # "share" mirrors `make install`/Homebrew (binary in bin/, shipped scripts in
 # share/ccswitch/); "sibling" mirrors a source checkout or the npm package.
