@@ -2282,6 +2282,16 @@ cmd_run() {
     [[ -z "$max_attempts" ]] && max_attempts="$total"
     [[ "$max_attempts" -lt 1 ]] && max_attempts=1
 
+    # Spool non-tty stdin so every attempt replays byte-identical input. A live
+    # pipe would be drained by attempt 1; a concurrent tee could truncate on
+    # SIGPIPE if attempt 1 exits early. Read it fully up front instead.
+    local stdin_spool=""
+    if [[ ! -t 0 ]]; then
+        stdin_spool=$(mktemp "${TMPDIR:-/tmp}/ccs-run-stdin.XXXXXX")
+        chmod 600 "$stdin_spool"
+        cat > "$stdin_spool"
+    fi
+
     local out_buf err_buf
     out_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-out.XXXXXX")
     err_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-err.XXXXXX")
@@ -2298,15 +2308,19 @@ cmd_run() {
 
         : > "$out_buf"; : > "$err_buf"
         local rc=0
-        "${cmd[@]}" >"$out_buf" 2>"$err_buf" || rc=$?
+        if [[ -n "$stdin_spool" ]]; then
+            "${cmd[@]}" <"$stdin_spool" >"$out_buf" 2>"$err_buf" || rc=$?
+        else
+            "${cmd[@]}" >"$out_buf" 2>"$err_buf" || rc=$?
+        fi
         cat "$err_buf" >&2
 
         if [[ $rc -eq 0 ]]; then
-            cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return 0
+            cat "$out_buf"; rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return 0
         fi
 
         if ! _run_detect_rate_limit "$out_buf" "$err_buf" "$started_account" "$limit_threshold"; then
-            cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return "$rc"
+            cat "$out_buf"; rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return "$rc"
         fi
 
         # PIN 2: capture the helper's rc set-e-safely.
@@ -2315,14 +2329,14 @@ cmd_run() {
         case "$hrc" in
             0|3) : ;;   # switched-healthy, or someone-else-rotated: retry either way
             2)  echo "ccs-run: switch-error attempts=$attempt" >&2
-                rm -f "$out_buf" "$err_buf"; return 2 ;;
+                rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return 2 ;;
             *)  echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
-                rm -f "$out_buf" "$err_buf"; return 3 ;;
+                rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return 3 ;;
         esac
     done
 
     echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
-    rm -f "$out_buf" "$err_buf"; return 3
+    rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return 3
 }
 
 # --- Endpoint health probe ------------------------------------------------

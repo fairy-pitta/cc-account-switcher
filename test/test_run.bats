@@ -300,3 +300,31 @@ M
     [[ "$output" == *"ccs-run: exhausted"* ]]
     [[ "$output" != *"FAILED-STDOUT-SHOULD-NOT-APPEAR"* ]]
 }
+
+# --- stdin replay ------------------------------------------------------------
+
+@test "run replays stdin byte-identically on the retry" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    # Fail (429) on account 1, but on account 2 echo back the stdin it received.
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+input=\$(cat)
+if [[ "\$active" == "1" ]]; then echo "429 rate_limit" >&2; exit 1; fi
+echo "GOT:\$input"
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run bash -c 'printf "%s" "the-secret-prompt" | HOME="'"$TEST_HOME"'" PATH="'"$MOCK_BIN:$ORIGINAL_PATH"'" /bin/bash "'"$CCSWITCH_SCRIPT"'" run --no-proactive -- claude -p'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GOT:the-secret-prompt"* ]]
+}
