@@ -136,3 +136,38 @@ M
     run run_ccswitch_rotate ""
     [ "$status" -eq 2 ]
 }
+
+# --- cmd_run: basic passthrough ----------------------------------------------
+
+# A mock "claude" whose behavior is driven by env the test sets:
+#   CLAUDE_MOCK_EXIT   — exit code (default 0)
+#   CLAUDE_MOCK_STDOUT — printed to stdout
+#   CLAUDE_MOCK_STDERR — printed to stderr
+install_mock_claude() {
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+[[ -n "${CLAUDE_MOCK_STDOUT:-}" ]] && printf '%s\n' "$CLAUDE_MOCK_STDOUT"
+[[ -n "${CLAUDE_MOCK_STDERR:-}" ]] && printf '%s\n' "$CLAUDE_MOCK_STDERR" >&2
+exit "${CLAUDE_MOCK_EXIT:-0}"
+M
+    chmod +x "$MOCK_BIN/claude"
+}
+
+@test "run executes the command and passes through its stdout on success" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    install_mock_claude
+
+    CLAUDE_MOCK_STDOUT="hello-from-claude" run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hello-from-claude"* ]]
+}
+
+@test "run errors when no command is given" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Usage: ccs run"* ]]
+}

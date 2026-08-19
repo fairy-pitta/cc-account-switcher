@@ -2210,6 +2210,53 @@ cmd_exec() {
     fi
 }
 
+# Run a command (typically `claude -p ...`) on the active account, switching to
+# another account and retrying when it fails because of a rate limit.
+# Usage: ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC]
+#                [--no-proactive] -- <command...>
+# shellcheck disable=SC2034  # limit_threshold/timeout_sec/proactive used in later tasks
+cmd_run() {
+    local max_attempts="" limit_threshold="95" timeout_sec="" proactive=true
+    local -a cmd=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --max-attempts)    max_attempts="$2"; shift 2 ;;
+            --limit-threshold) limit_threshold="$2"; shift 2 ;;
+            --timeout)         timeout_sec="$2"; shift 2 ;;
+            --no-proactive)    proactive=false; shift ;;
+            --)                shift; cmd=("$@"); break ;;
+            *)  echo "Error: unknown option '$1' (put the command after --)" >&2; exit 2 ;;
+        esac
+    done
+
+    if [[ ${#cmd[@]} -eq 0 ]]; then
+        echo "Usage: ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC] [--no-proactive] -- <command...>" >&2
+        exit 2
+    fi
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: no accounts are managed yet" >&2
+        exit 2
+    fi
+    setup_directories
+
+    local total
+    total=$(jq '.sequence | length' "$SEQUENCE_FILE" 2>/dev/null || echo "0")
+    [[ -z "$max_attempts" ]] && max_attempts="$total"
+    [[ "$max_attempts" -lt 1 ]] && max_attempts=1
+
+    # Buffers (cleaned up by the trap installed in a later task).
+    local out_buf
+    out_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-out.XXXXXX")
+
+    "${cmd[@]}" >"$out_buf" 2>&1
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        cat "$out_buf"; rm -f "$out_buf"; return 0
+    fi
+    cat "$out_buf"; rm -f "$out_buf"
+    return "$rc"
+}
+
 # --- Endpoint health probe ------------------------------------------------
 # Endpoints have no usage API; fallback is reactive. A request is "unhealthy"
 # (trigger fallback) on auth failure, rate/credit limit, server error, or
@@ -3006,6 +3053,7 @@ show_usage() {
     echo "Parallel / isolated accounts (CLAUDE_CONFIG_DIR):"
     echo "  exec <num|email|label> -- <cmd>  Run a command as an account, isolated"
     echo "  config-dir <num|email|label> [path]  Materialize an account's config dir, print it"
+    echo "  run [opts] -- <command...>       Run a command, auto-switch + retry on rate limit"
     echo ""
     echo "Rate Limiting:"
     echo "  rate-check [--threshold N]       Check if usage exceeds threshold"
@@ -3153,6 +3201,10 @@ main() {
         config-dir)
             shift
             cmd_config_dir "$@"
+            ;;
+        run)
+            shift
+            cmd_run "$@"
             ;;
         resume-mode)
             shift
