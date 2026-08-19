@@ -2237,6 +2237,13 @@ _run_detect_rate_limit() {
     fi
 
     # SECONDARY (usage/health): only reached when the grep was inconclusive.
+    # This inspects the CURRENTLY-active account/credentials. If a concurrent
+    # `ccs` switched the shared account since the child ran under $account, we
+    # can't attribute usage/health to $account — don't misclassify: treat as
+    # not-rate-limited and let the caller pass the original failure through.
+    if [[ -n "$account" && "$(effective_active_account_num)" != "$account" ]]; then
+        return 1
+    fi
     if [[ -n "$account" ]] && is_endpoint_account "$account"; then
         probe_endpoint_health "$account" || return 0   # unhealthy endpoint = limited
         return 1

@@ -615,3 +615,39 @@ M
     [ "$status" -eq 2 ]
     [[ "$output" == *"requires a value"* ]]
 }
+
+# Detection secondary-fallback account-race guard (Codex/Fable TOCTOU).
+run_ccswitch_detect_acct() {
+    # args: <stderr-content> <account> <threshold>
+    local se="$1" acct="$2" thr="$3"
+    HOME="$TEST_HOME" PATH="$MOCK_BIN:$ORIGINAL_PATH" /bin/bash -c '
+        CCS_TEST_FUNC=1
+        source "'"$CCSWITCH_SCRIPT"'"
+        obuf=$(mktemp); ebuf=$(mktemp)
+        : > "$obuf"; printf "%s\n" "$1" > "$ebuf"
+        _run_detect_rate_limit "$obuf" "$ebuf" "$2" "$3"
+        rc=$?; rm -f "$obuf" "$ebuf"; exit $rc
+    ' _ "$se" "$acct" "$thr"
+}
+
+@test "detect: usage fallback is skipped when the active account drifted" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+    create_fake_credentials "user1@example.com"
+    # A cache/API that would report over-threshold usage if consulted.
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":99.0,"limit":100,"used":99}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+
+    # Active account is 1; a non-limit failure that ran under account 99 (drift):
+    # no grep marker, account mismatch -> guard skips fallback -> NOT rate-limited.
+    run run_ccswitch_detect_acct "Error: ENOENT no such file" "99" "80"
+    [ "$status" -ne 0 ]
+
+    # Sanity: with the matching active account (1), the usage fallback DOES fire.
+    run run_ccswitch_detect_acct "Error: ENOENT no such file" "1" "80"
+    [ "$status" -eq 0 ]
+}
