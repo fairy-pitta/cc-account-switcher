@@ -545,6 +545,82 @@ readonly CCS_ENV_KEYS=("ANTHROPIC_BASE_URL" "ANTHROPIC_API_KEY" "ANTHROPIC_AUTH_
 
 ccs_settings_file() { echo "$HOME/.claude/settings.json"; }
 
+# Absolute directory holding <path>. Pass --physical to resolve symlinked
+# directory components as well.
+_abs_dir() {
+    local dir="${1%/*}"
+    [[ "$dir" == "$1" ]] && dir="."
+    if [[ "${2:-}" == "--physical" ]]; then
+        (cd -P "$dir" && pwd)
+    else
+        (cd "$dir" && pwd)
+    fi
+}
+
+# The path ccs was invoked through, made absolute but with symlinks left alone.
+# This is the path we hand to the hook and the statusline as $CCS_PATH: an
+# install is usually reached through a stable link (/opt/homebrew/bin/ccs) while
+# the file behind it sits in a versioned directory that an upgrade replaces.
+ccs_invoked_path() {
+    printf '%s/%s\n' "$(_abs_dir "${BASH_SOURCE[0]}")" "${BASH_SOURCE[0]##*/}"
+}
+
+# The real file behind that path, symlinks resolved — the scripts we ship sit
+# next to it, or next to the bin/ directory holding it.
+ccs_real_path() {
+    local src="${BASH_SOURCE[0]}" target
+    while [[ -L "$src" ]]; do
+        target="$(readlink "$src")"
+        if [[ "$target" == /* ]]; then
+            src="$target"
+        else
+            src="$(_abs_dir "$src" --physical)/$target"
+        fi
+    done
+    printf '%s/%s\n' "$(_abs_dir "$src" --physical)" "${src##*/}"
+}
+
+# Locate a script shipped with ccs, given its path relative to the project root
+# (e.g. "hooks/ccs-rate-hook.sh"). Installs lay them out one of two ways:
+#   - next to ccswitch.sh (source checkout, npm package)
+#   - <prefix>/share/ccswitch/ while only the binary goes in <prefix>/bin
+#     (`make install`, Homebrew)
+# Both are searched from the invocation path before the symlink-resolved one, so
+# an install reached through a stable link yields a stable script path that
+# survives an upgrade. $CCS_SHARE_DIR overrides the search for packagers.
+# Echoes the path, or explains the failure on stderr and returns 1.
+ccs_shipped_script() {
+    local rel="$1" invoked_dir real_dir candidate
+    invoked_dir="$(_abs_dir "${BASH_SOURCE[0]}")"
+    real_dir="$(ccs_real_path)"
+    real_dir="${real_dir%/*}"
+
+    for candidate in \
+        "${CCS_SHARE_DIR:+${CCS_SHARE_DIR%/}/$rel}" \
+        "$invoked_dir/$rel" "${invoked_dir%/*}/share/ccswitch/$rel" \
+        "$real_dir/$rel" "${real_dir%/*}/share/ccswitch/$rel"
+    do
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    echo "Error: $rel not found." >&2
+    echo "Reinstall ccs so the scripts it ships are installed with it, or set" >&2
+    echo "CCS_SHARE_DIR to the directory that holds ${rel%%/*}/." >&2
+    return 1
+}
+
+# jq predicate: is this hook / statusLine command one we installed? Matches the
+# script name as a whole path element, so a user's own my-ccs-rate-hook.sh — or a
+# wrapper that merely mentions the name — is never mistaken for ours. Matching on
+# the name rather than the full path means entries stay ours across a reinstall
+# at a different prefix.
+# shellcheck disable=SC2016  # $name is a jq variable, not a shell one
+readonly CCS_OWNED_JQ='def ccs_owned($name):
+    ((. // "") | test("(^|/)" + ($name | gsub("\\."; "\\.")) + "([[:space:]]|$)"));'
+
 # Path to the OAuth usage cache. Honors $CCS_USAGE_CACHE so tests can keep it in
 # their fixture instead of a host-global temp file. Otherwise it resolves the
 # system temp dir ($TMPDIR/$TMP/$TEMP, falling back to /tmp) so macOS, Linux,
@@ -2463,6 +2539,36 @@ _rate_hook_deny() {
 EOF
 }
 
+# Remove the PreToolUse hook we installed from a settings file, leaving any hook
+# the user installed themselves alone. Handles both the legacy flat shape
+# ({matcher, command}) and the nested-hooks shape, and drops matcher entries left
+# with no handlers.
+_rate_hook_uninstall() {
+    local settings_file="$1"
+    [[ -f "$settings_file" ]] || return 0
+
+    local cleaned
+    cleaned=$(jq --arg name "ccs-rate-hook.sh" "$CCS_OWNED_JQ"'
+        if .hooks and .hooks.PreToolUse then
+            .hooks.PreToolUse = [
+                .hooks.PreToolUse[]
+                # drop legacy flat entries referencing the hook
+                | select((.command | ccs_owned($name)) | not)
+                # strip the hook from nested handler arrays
+                | (if has("hooks") then
+                       .hooks = (.hooks | map(select((.command | ccs_owned($name)) | not)))
+                   else . end)
+                # drop entries whose nested hooks array is now empty
+                | select((has("hooks") | not) or ((.hooks | length) > 0))
+            ]
+        else . end
+    ' "$settings_file" 2>/dev/null) || return 0
+
+    if [[ -n "$cleaned" ]]; then
+        write_json "$settings_file" "$cleaned"
+    fi
+}
+
 # Rate limit auto-switch setup
 # Usage: ccs rate-setup [--threshold N] [--disable]
 cmd_rate_setup() {
@@ -2490,45 +2596,23 @@ cmd_rate_setup() {
 
     local settings_file="$HOME/.claude/settings.local.json"
 
-    # Determine hook script path
-    local hook_script
-    hook_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hooks/ccs-rate-hook.sh"
-
     if [[ "$disable" == true ]]; then
         # Disable: update config and remove hook
         local updated
         updated=$(jq '.rateLimit = {enabled: false}' "$SEQUENCE_FILE" 2>/dev/null)
         write_json "$SEQUENCE_FILE" "$updated"
 
-        # Remove hook from settings.local.json if present (match by hook script
-        # path). Handles both the legacy flat shape and the nested-hooks shape,
-        # and drops matcher entries whose nested hooks array becomes empty.
-        if [[ -f "$settings_file" ]]; then
-            local cleaned
-            cleaned=$(jq --arg hook "$hook_script" '
-                if .hooks and .hooks.PreToolUse then
-                    .hooks.PreToolUse = [
-                        .hooks.PreToolUse[]
-                        # drop legacy flat entries referencing the hook
-                        | select(((.command // "") | contains($hook)) | not)
-                        # strip the hook from nested handler arrays
-                        | (if has("hooks") then
-                               .hooks = (.hooks | map(select((.command // "") | contains($hook) | not)))
-                           else . end)
-                        # drop entries whose nested hooks array is now empty
-                        | select((has("hooks") | not) or ((.hooks | length) > 0))
-                    ]
-                else . end
-            ' "$settings_file" 2>/dev/null)
-            if [[ -n "$cleaned" ]]; then
-                echo "$cleaned" | jq . > "$settings_file"
-            fi
-        fi
+        _rate_hook_uninstall "$settings_file"
 
         echo "Rate limit auto-switch disabled."
         echo "Hook removed from $settings_file"
         return
     fi
+
+    # Locate the hook script before touching config, so a failed lookup doesn't
+    # leave the rate limit enabled with no hook to enforce it.
+    local hook_script
+    hook_script="$(ccs_shipped_script "hooks/ccs-rate-hook.sh")" || return 1
 
     # Enable: update config
     local updated
@@ -2537,55 +2621,39 @@ cmd_rate_setup() {
     ' "$SEQUENCE_FILE" 2>/dev/null)
     write_json "$SEQUENCE_FILE" "$updated"
 
-    # Check hook script exists
-    if [[ ! -f "$hook_script" ]]; then
-        echo "Warning: Hook script not found at $hook_script"
-        echo "Make sure you have the hooks/ccs-rate-hook.sh file installed."
-        return 1
-    fi
-
     # Install hook into settings.local.json
     mkdir -p "$(dirname "$settings_file")"
     if [[ ! -f "$settings_file" ]]; then
         echo '{}' > "$settings_file"
     fi
 
-    # Resolve absolute path to this script (ccs binary) for CCS_PATH
-    local ccs_bin
-    ccs_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-
     # Build hook command with CCS_PATH so the hook can reliably find ccs
-    local hook_command="CCS_PATH=${ccs_bin} ${hook_script}"
+    local ccs_bin hook_command
+    ccs_bin="$(ccs_invoked_path)"
+    hook_command="CCS_PATH=${ccs_bin} ${hook_script}"
 
-    # Check if hook already exists (idempotent) — match by hook script path.
-    # Detect both the legacy flat shape ({matcher, command}) and the correct
-    # nested shape ({matcher, hooks: [{type, command}]}).
-    local hook_exists
-    hook_exists=$(jq --arg hook "$hook_script" '
-        [ .hooks.PreToolUse // [] | .[]
-          | ( (.command // empty), ( .hooks // [] | .[] | .command // empty ) )
-        ] | map(select(contains($hook))) | length
-    ' "$settings_file" 2>/dev/null || echo "0")
+    # Drop any hook entry we installed before, then append the current one. This
+    # keeps repeated runs idempotent and also repairs entries left behind by an
+    # earlier install at a different path.
+    _rate_hook_uninstall "$settings_file"
 
-    if [[ "$hook_exists" == "0" ]]; then
-        # Write the Claude Code hook schema: a matcher entry containing a
-        # nested "hooks" array of command handlers. matcher "" matches all tools.
-        local with_hook
-        with_hook=$(jq --arg hook "$hook_command" '
-            .hooks.PreToolUse = (.hooks.PreToolUse // []) + [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": $hook
-                        }
-                    ]
-                }
-            ]
-        ' "$settings_file" 2>/dev/null)
-        echo "$with_hook" | jq . > "$settings_file"
-    fi
+    # Write the Claude Code hook schema: a matcher entry containing a nested
+    # "hooks" array of command handlers. matcher "" matches all tools.
+    local with_hook
+    with_hook=$(jq --arg hook "$hook_command" '
+        .hooks.PreToolUse = (.hooks.PreToolUse // []) + [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": $hook
+                    }
+                ]
+            }
+        ]
+    ' "$settings_file" 2>/dev/null)
+    write_json "$settings_file" "$with_hook"
 
     echo "Rate limit auto-switch enabled."
     echo "  Threshold: ${threshold}%"
@@ -2610,20 +2678,18 @@ cmd_statusline_setup() {
     done
 
     local settings_file="$HOME/.claude/settings.local.json"
-    local statusline_script
-    statusline_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/statusline/ccs-statusline.sh"
 
     if [[ "$disable" == true ]]; then
-        # Only remove the statusLine if it's ours (command references our script),
-        # so we never clobber a user's own statusline.
+        # Only remove the statusLine if it's ours, so we never clobber a user's
+        # own statusline.
         if [[ -f "$settings_file" ]]; then
             local cleaned
-            cleaned=$(jq --arg s "$statusline_script" '
-                if (.statusLine.command // "") | contains($s)
+            cleaned=$(jq --arg name "ccs-statusline.sh" "$CCS_OWNED_JQ"'
+                if (.statusLine.command | ccs_owned($name))
                 then del(.statusLine) else . end
-            ' "$settings_file" 2>/dev/null)
+            ' "$settings_file" 2>/dev/null) || cleaned=""
             if [[ -n "$cleaned" ]]; then
-                echo "$cleaned" | jq . > "$settings_file"
+                write_json "$settings_file" "$cleaned"
             fi
         fi
         echo "ccs statusline disabled."
@@ -2631,33 +2697,33 @@ cmd_statusline_setup() {
         return
     fi
 
-    if [[ ! -f "$statusline_script" ]]; then
-        echo "Warning: statusline script not found at $statusline_script"
-        echo "Make sure you have the statusline/ccs-statusline.sh file installed."
-        return 1
-    fi
+    local statusline_script
+    statusline_script="$(ccs_shipped_script "statusline/ccs-statusline.sh")" || return 1
 
     mkdir -p "$(dirname "$settings_file")"
     [[ -f "$settings_file" ]] || echo '{}' > "$settings_file"
 
-    # Resolve absolute path to this script (ccs) so the statusline can find it.
-    local ccs_bin
-    ccs_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-    local sl_command="CCS_PATH=${ccs_bin} ${statusline_script}"
+    # CCS_PATH so the statusline can find ccs.
+    local ccs_bin sl_command
+    ccs_bin="$(ccs_invoked_path)"
+    sl_command="CCS_PATH=${ccs_bin} ${statusline_script}"
 
-    # Warn (but proceed) if a different statusline is already configured.
-    local existing
-    existing=$(jq -r '.statusLine.command // empty' "$settings_file" 2>/dev/null || true)
-    if [[ -n "$existing" && "$existing" != *"$statusline_script"* ]]; then
+    # Warn (but proceed) when we're replacing someone else's statusline.
+    local foreign
+    foreign=$(jq -r --arg name "ccs-statusline.sh" "$CCS_OWNED_JQ"'
+        if (.statusLine.command | ccs_owned($name))
+        then empty else .statusLine.command // empty end
+    ' "$settings_file" 2>/dev/null || true)
+    if [[ -n "$foreign" ]]; then
         echo "Note: replacing an existing statusLine command:"
-        echo "  was: $existing"
+        echo "  was: $foreign"
     fi
 
     local with_sl
     with_sl=$(jq --arg cmd "$sl_command" '
         .statusLine = {"type": "command", "command": $cmd}
     ' "$settings_file" 2>/dev/null)
-    echo "$with_sl" | jq . > "$settings_file"
+    write_json "$settings_file" "$with_sl"
 
     echo "ccs statusline enabled."
     echo "  Statusline script: $statusline_script"

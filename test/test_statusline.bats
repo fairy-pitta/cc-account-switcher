@@ -97,6 +97,39 @@ run_statusline() {
     [[ "$cmd" == *"ccs-statusline.sh"* ]]
 }
 
+@test "statusline-setup finds the script when only the binary is in bin/ (make install layout)" {
+    # `make install` puts ccs in <prefix>/bin and the shipped scripts in
+    # <prefix>/share/ccswitch — the statusline is not next to the binary.
+    local prefix="$TEST_HOME/prefix" ccs
+    ccs="$(install_ccs_prefix "$prefix" share)"
+
+    run run_ccswitch_at "$ccs" statusline-setup
+    [ "$status" -eq 0 ]
+
+    local cmd
+    cmd=$(jq -r '.statusLine.command' "$SETTINGS_FILE")
+    [[ "$cmd" == *"$prefix/share/ccswitch/statusline/ccs-statusline.sh"* ]]
+}
+
+@test "statusline-setup does not report its own entry as a foreign statusline" {
+    run_ccswitch statusline-setup
+    run run_ccswitch statusline-setup
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"replacing an existing statusLine"* ]]
+}
+
+@test "statusline-setup --disable leaves a similarly named third-party statusline intact" {
+    mkdir -p "$(dirname "$SETTINGS_FILE")"
+    echo '{"statusLine":{"type":"command","command":"/home/u/bin/my-ccs-statusline.sh"}}' \
+        > "$SETTINGS_FILE"
+
+    run run_ccswitch statusline-setup --disable
+    [ "$status" -eq 0 ]
+    local cmd
+    cmd=$(jq -r '.statusLine.command' "$SETTINGS_FILE")
+    [ "$cmd" = "/home/u/bin/my-ccs-statusline.sh" ]
+}
+
 @test "statusline-setup --disable removes our statusLine" {
     run_ccswitch statusline-setup
     run run_ccswitch statusline-setup --disable

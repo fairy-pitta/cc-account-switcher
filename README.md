@@ -185,6 +185,8 @@ ccs rate-check --max-age 30      # Treat the cache as stale after 30s
 ccs rate-setup --disable         # Remove hook and disable
 ```
 
+`rate-setup` looks for the hook script (`hooks/ccs-rate-hook.sh`) next to `ccswitch.sh` — source checkouts and the npm package — and then in `<prefix>/share/ccswitch/`, where `make install` and Homebrew put it. Set `$CCS_SHARE_DIR` to override the location. The same applies to the statusline script below.
+
 **How it works:**
 
 1. The usage cache lives at `$TMPDIR/claude-usage-cache.json` (falling back to `/tmp` when `$TMPDIR`/`$TMP`/`$TEMP` are unset; override with `$CCS_USAGE_CACHE`) with a `cached_at` timestamp.

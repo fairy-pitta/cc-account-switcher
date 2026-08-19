@@ -60,12 +60,15 @@ fi
 
 # Delegate to ccs rate-check (refreshes the cache if missing/stale, then switches
 # if over threshold). Resolve ccs: 1) CCS_PATH env (set by rate-setup),
-# 2) sibling of this script's dir, 3) PATH, 4) common locations.
+# 2) sibling of this script's dir (source checkout, npm package), 3) the bin/
+# next to the share/ccswitch/ we were installed into (`make install`, Homebrew),
+# 4) PATH, 5) common locations.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CCS="${CCS_PATH:-}"
-[[ -z "$CCS" || ! -x "$CCS" ]] && CCS="${SCRIPT_DIR}/../ccswitch.sh"
+[[ -x "$CCS" ]] || CCS="${SCRIPT_DIR}/../ccswitch.sh"
+[[ -x "$CCS" ]] || CCS="${SCRIPT_DIR}/../../../bin/ccs"
 [[ -x "$CCS" ]] || CCS=$(command -v ccs 2>/dev/null || echo "")
-[[ -z "$CCS" || ! -x "$CCS" ]] && CCS="/usr/local/bin/ccs"
+[[ -x "$CCS" ]] || CCS="/usr/local/bin/ccs"
 [[ -x "$CCS" ]] || { echo "ccs not found" >&2; exit 0; }
 
 # Run in subshell, capture output. On any failure → fail open.
