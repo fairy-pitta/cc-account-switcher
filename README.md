@@ -252,7 +252,7 @@ ccs run --max-attempts 3 --timeout 120 -- claude -p "..."
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--max-attempts N` | number of accounts | Maximum total attempts across all accounts |
-| `--limit-threshold N` | 95 | Usage % threshold for the pre-run check |
+| `--limit-threshold N` | 95 | Usage % for the secondary/reactive limit confirmation and post-switch health check (default 95) |
 | `--timeout SEC` | none | Per-attempt time limit; kills the child's process group |
 | `--no-proactive` | — | Skip the pre-run usage check |
 

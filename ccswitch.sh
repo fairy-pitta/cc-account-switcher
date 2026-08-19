@@ -2320,11 +2320,14 @@ cmd_run() {
     # pipe would be drained by attempt 1; a concurrent tee could truncate on
     # SIGPIPE if attempt 1 exits early. Read it fully up front instead.
     local stdin_spool="" child_pid="" watchdog_pid="" timeout_flag=""
+    if [[ -n "$timeout_sec" ]]; then
+        timeout_flag=$(mktemp "${TMPDIR:-/tmp}/ccs-run-timeout.XXXXXX")
+    fi
 
     # Unified cleanup: kill any live watchdog/child (and its process group)
     # and remove all temp files.
     _ccs_run_cleanup() {
-        [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null
+        [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null || true
         # kill -TERM -PID sends SIGTERM to the entire process group (PID == PGID
         # because set -m made the child a group leader before launch).
         [[ -n "$child_pid" ]] && kill -TERM -"$child_pid" 2>/dev/null || true
@@ -2358,6 +2361,8 @@ cmd_run() {
         fi
 
         : > "$out_buf"; : > "$err_buf"
+        # Reset the timeout flag for this attempt (truncate so prior content gone).
+        [[ -n "$timeout_flag" ]] && : > "$timeout_flag"
         local rc=0 timed_out=0
         # set -m makes the background job its own process-group leader (PGID==PID),
         # so kill -TERM -"$child_pid" can signal the entire tree. set +m restores
@@ -2377,14 +2382,12 @@ cmd_run() {
         set +m
 
         if [[ -n "$timeout_sec" ]]; then
-            # Use a path (not yet created) as a flag; watchdog touches it before
-            # killing so parent can detect timeout even across the kill-0 race.
-            timeout_flag="${TMPDIR:-/tmp}/ccs-run-timeout.$$.${attempt}"
             # Watchdog: sleep then signal the entire process group (child_pid ==
-            # PGID because set -m was active at launch). Touch flag BEFORE kill
-            # so the parent detects timeout even if it wins the kill-0 race.
+            # PGID because set -m was active at launch). Touch the single shared
+            # flag BEFORE kill so the parent detects timeout even if it wins the
+            # kill-0 race. The flag was truncated at the top of this attempt.
             ( sleep "$timeout_sec"
-              touch "$timeout_flag" 2>/dev/null
+              echo 1 > "$timeout_flag" 2>/dev/null
               kill -TERM -"$child_pid" 2>/dev/null ) &
             watchdog_pid=$!
         fi
@@ -2395,8 +2398,8 @@ cmd_run() {
                 kill "$watchdog_pid" 2>/dev/null    # child finished first
             fi
             wait "$watchdog_pid" 2>/dev/null || true
-            # Timeout occurred iff the watchdog touched the flag (before kill).
-            if [[ -n "$timeout_flag" && -f "$timeout_flag" ]]; then
+            # Timeout occurred iff the watchdog wrote to the flag (before kill).
+            if [[ -n "$timeout_flag" && -s "$timeout_flag" ]]; then
                 timed_out=1
             fi
             watchdog_pid=""
