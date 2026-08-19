@@ -2350,10 +2350,10 @@ cmd_run() {
     # Unified cleanup: kill any live watchdog/child (and its process group)
     # and remove all temp files.
     _ccs_run_cleanup() {
-        [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null || true
+        if [[ -n "$watchdog_pid" ]]; then kill "$watchdog_pid" 2>/dev/null || true; fi
         # kill -TERM -PID sends SIGTERM to the entire process group (PID == PGID
         # because set -m made the child a group leader before launch).
-        [[ -n "$child_pid" ]] && kill -TERM -"$child_pid" 2>/dev/null || true
+        if [[ -n "$child_pid" ]]; then kill -TERM -"$child_pid" 2>/dev/null || true; fi
         rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"} ${timeout_flag:+"$timeout_flag"}
     }
     trap '_ccs_run_cleanup; trap - INT TERM; exit 130' INT
@@ -2487,7 +2487,7 @@ cmd_run() {
                 # switched-healthy, or someone-else-rotated: retry either way.
                 # Jittered backoff before the next attempt to avoid retry storms
                 # when many `ccs run` share one global account.
-                [[ $attempt -lt $max_attempts ]] && sleep "0.$(( RANDOM % 5 ))" 2>/dev/null || true
+                if [[ $attempt -lt $max_attempts ]]; then sleep "0.$(( RANDOM % 5 ))" 2>/dev/null || true; fi
                 ;;
             2)  echo "ccs-run: switch-error attempts=$attempt" >&2
                 _ccs_run_cleanup; trap - INT TERM; return 2 ;;
