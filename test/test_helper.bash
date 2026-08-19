@@ -300,8 +300,40 @@ source_ccswitch_functions() {
     set -e
 }
 
-# Run ccswitch.sh as a subprocess with our mocked environment
+# Run a copy of ccswitch.sh (at an arbitrary path, so install layouts can be
+# exercised) as a subprocess with our mocked environment.
 # Uses /bin/bash directly; our mock bash in MOCK_BIN handles --version checks
+run_ccswitch_at() {
+    local script="$1"
+    shift
+    HOME="$TEST_HOME" PATH="$MOCK_BIN:$ORIGINAL_PATH" /bin/bash "$script" "$@"
+}
+
+# Run ccswitch.sh from the source tree
 run_ccswitch() {
-    HOME="$TEST_HOME" PATH="$MOCK_BIN:$ORIGINAL_PATH" /bin/bash "$CCSWITCH_SCRIPT" "$@"
+    run_ccswitch_at "$CCSWITCH_SCRIPT" "$@"
+}
+
+# Build an install layout under <prefix> and echo the path of its ccs binary.
+# "share" mirrors `make install`/Homebrew (binary in bin/, shipped scripts in
+# share/ccswitch/); "sibling" mirrors a source checkout or the npm package.
+install_ccs_prefix() {
+    local prefix="$1" layout="${2:-share}"
+    local script_root="${BATS_TEST_DIRNAME}/.."
+    local dest="$prefix/bin"
+
+    mkdir -p "$dest"
+    cp "$CCSWITCH_SCRIPT" "$dest/ccs"
+
+    case "$layout" in
+        share) dest="$prefix/share/ccswitch" ;;
+        sibling) ;;
+        *) echo "unknown layout: $layout" >&2; return 1 ;;
+    esac
+
+    mkdir -p "$dest/hooks" "$dest/statusline"
+    cp "$script_root/hooks/ccs-rate-hook.sh" "$dest/hooks/"
+    cp "$script_root/statusline/ccs-statusline.sh" "$dest/statusline/"
+
+    echo "$prefix/bin/ccs"
 }

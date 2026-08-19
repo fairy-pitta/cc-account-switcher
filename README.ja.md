@@ -208,6 +208,8 @@ ccs rate-check --auto-switch     # 閾値超過なら切り替え
 ccs rate-setup --disable         # フックを削除して無効化
 ```
 
+`rate-setup` はフックスクリプト（`hooks/ccs-rate-hook.sh`）を、まず `ccswitch.sh` と同じ場所（ソースチェックアウトと npm パッケージ）、次に `<prefix>/share/ccswitch/`（`make install` と Homebrew のインストール先）から探します。`$CCS_SHARE_DIR` で場所を上書きできます。後述の statusline スクリプトも同様です。
+
 **仕組み:**
 
 1. ステータスラインスクリプトが Anthropic Usage API を呼び出し、`$TMPDIR/claude-usage-cache.json`（`$TMPDIR`/`$TMP`/`$TEMP` 未設定時は `/tmp`、`$CCS_USAGE_CACHE` で上書き可）にキャッシュ

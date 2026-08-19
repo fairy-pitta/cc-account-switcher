@@ -27,12 +27,15 @@ fi
 SEQ="$HOME/.claude-switch-backup/sequence.json"
 
 # Resolve ccs: 1) CCS_PATH env (set by statusline-setup), 2) sibling of this
-# script's dir, 3) PATH, 4) common locations.
+# script's dir (source checkout, npm package), 3) the bin/ next to the
+# share/ccswitch/ we were installed into (`make install`, Homebrew), 4) PATH,
+# 5) common locations.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "")"
 CCS="${CCS_PATH:-}"
-[[ -z "$CCS" || ! -x "$CCS" ]] && CCS="${SCRIPT_DIR}/../ccswitch.sh"
+[[ -x "$CCS" ]] || CCS="${SCRIPT_DIR}/../ccswitch.sh"
+[[ -x "$CCS" ]] || CCS="${SCRIPT_DIR}/../../../bin/ccs"
 [[ -x "$CCS" ]] || CCS=$(command -v ccs 2>/dev/null || echo "")
-[[ -z "$CCS" || ! -x "$CCS" ]] && CCS="/usr/local/bin/ccs"
+[[ -x "$CCS" ]] || CCS="/usr/local/bin/ccs"
 
 # Kick a TTL-aware refresh in the background (no --auto-switch: refreshing the
 # cache is the statusline's job; switching is the hook's). Detached so the render
@@ -45,18 +48,29 @@ fi
 if [[ -f "$CACHE_FILE" ]]; then
     acct=$(jq -r '.active_account // "?"' "$CACHE_FILE" 2>/dev/null || echo "?")
     util=$(jq -r '.five_hour.utilization // 0' "$CACHE_FILE" 2>/dev/null || echo "0")
-    util_int=$(printf "%.0f" "$util" 2>/dev/null || echo "0")
 
-    # Threshold marker: append "(!)" when at/over the configured threshold.
-    threshold=80
-    if [[ -f "$SEQ" ]]; then
-        cfg=$(jq -r '.rateLimit.threshold // empty' "$SEQ" 2>/dev/null || true)
-        [[ -n "$cfg" ]] && threshold="$cfg"
+    # Round the way ccswitch.sh's usage_to_int() does — keep the two in sync.
+    # LC_ALL=C because printf's %f honors LC_NUMERIC and a comma-decimal locale
+    # fails on the cache's dot-decimal string after printing a partial result;
+    # a statement inside the subshell, not an `LC_ALL=C printf` prefix, because
+    # bash 3.2 (macOS /bin/bash) ignores the prefix for a builtin. No `|| echo`
+    # fallback inside the substitution, which would append to that partial output
+    # and render 15.0 as 150%.
+    if util_int=$(LC_ALL=C; printf '%.0f' "$util" 2>/dev/null) && [[ "$util_int" =~ ^-?[0-9]+$ ]]; then
+        # Threshold marker: append "(!)" when at/over the configured threshold.
+        threshold=80
+        if [[ -f "$SEQ" ]]; then
+            cfg=$(jq -r '.rateLimit.threshold // empty' "$SEQ" 2>/dev/null || true)
+            [[ -n "$cfg" ]] && threshold="$cfg"
+        fi
+        marker=""
+        [[ "$util_int" -ge "$threshold" ]] && marker=" (!)"
+
+        printf 'ccs %s · 5h %s%%%s\n' "$acct" "$util_int" "$marker"
+    else
+        # Say so rather than show a number we made up.
+        printf 'ccs %s · 5h ?%%\n' "$acct"
     fi
-    marker=""
-    [[ "$util_int" -ge "$threshold" ]] && marker=" (!)"
-
-    printf 'ccs %s · 5h %s%%%s\n' "$acct" "$util_int" "$marker"
 else
     printf 'ccs (no usage data yet)\n'
 fi
