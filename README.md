@@ -172,7 +172,7 @@ ccs auto                         # Switch based on current directory
 Automatically switch to the next account when your 5-hour usage exceeds a threshold. Uses Claude Code's [PreToolUse hook](https://docs.anthropic.com/en/docs/claude-code/hooks) system — no polling, no background processes.
 
 ```bash
-# Set up (one-time) — installs a PreToolUse hook into Claude Code
+# Set up (one-time) — installs a PreToolUse hook into ~/.claude/settings.json
 ccs rate-setup                   # Enable with default 80% threshold
 ccs rate-setup --threshold 70    # Custom threshold
 
@@ -201,9 +201,12 @@ ccs rate-setup --disable         # Remove hook and disable
 **Optional statusline:** for interactive sessions you can install a statusline that shows the active account and 5-hour usage while keeping the cache warm:
 
 ```bash
-ccs statusline-setup             # Install (writes .statusLine into settings.local.json)
+ccs statusline-setup             # Install (writes .statusLine into ~/.claude/settings.json)
+ccs statusline-setup --force     # Same, replacing a statusline you already configured
 ccs statusline-setup --disable   # Remove it (leaves any other statusline untouched)
 ```
+
+If `~/.claude/settings.json` already sets a `statusLine` that isn't ours, `statusline-setup` stops and tells you — pass `--force` to replace it, or call `statusline/ccs-statusline.sh` from your own statusline script to render both.
 
 It renders e.g. `ccs you@example.com · 5h 42%` and appends `(!)` once you cross the threshold. The cache refresh runs in the background, so it never blocks the prompt. The statusline is **not required** — headless runs refresh the cache on demand (above).
 

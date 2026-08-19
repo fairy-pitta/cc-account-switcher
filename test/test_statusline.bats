@@ -6,11 +6,13 @@ load test_helper
 
 STATUSLINE_SCRIPT=""
 SETTINGS_FILE=""
+LEGACY_SETTINGS_FILE=""
 
 setup() {
     setup_test_env
     STATUSLINE_SCRIPT="${BATS_TEST_DIRNAME}/../statusline/ccs-statusline.sh"
-    SETTINGS_FILE="$HOME/.claude/settings.local.json"
+    SETTINGS_FILE="$HOME/.claude/settings.json"
+    LEGACY_SETTINGS_FILE="$HOME/.claude/settings.local.json"
     # Offline: any background refresh must not hit the network.
     cat > "$MOCK_BIN/curl" << 'MOCK_EOF'
 #!/bin/bash
@@ -148,4 +150,82 @@ run_statusline() {
     local cmd
     cmd=$(jq -r '.statusLine.command' "$SETTINGS_FILE")
     [ "$cmd" = "/usr/local/bin/my-own-line" ]
+}
+
+@test "statusline-setup refuses to replace a foreign statusline without --force" {
+    mkdir -p "$(dirname "$SETTINGS_FILE")"
+    echo '{"statusLine":{"type":"command","command":"/usr/local/bin/my-own-line"}}' > "$SETTINGS_FILE"
+
+    run run_ccswitch statusline-setup
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--force"* ]]
+    local cmd
+    cmd=$(jq -r '.statusLine.command' "$SETTINGS_FILE")
+    [ "$cmd" = "/usr/local/bin/my-own-line" ]
+}
+
+@test "statusline-setup --force replaces a foreign statusline" {
+    mkdir -p "$(dirname "$SETTINGS_FILE")"
+    echo '{"statusLine":{"type":"command","command":"/usr/local/bin/my-own-line"}}' > "$SETTINGS_FILE"
+
+    run run_ccswitch statusline-setup --force
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"my-own-line"* ]]
+    local cmd
+    cmd=$(jq -r '.statusLine.command' "$SETTINGS_FILE")
+    [[ "$cmd" == *"ccs-statusline.sh"* ]]
+}
+
+@test "statusline-setup keeps unrelated user settings" {
+    mkdir -p "$(dirname "$SETTINGS_FILE")"
+    echo '{"model":"opus","env":{"ANTHROPIC_MODEL":"sonnet"}}' > "$SETTINGS_FILE"
+
+    run run_ccswitch statusline-setup
+    [ "$status" -eq 0 ]
+    run jq -e '.model == "opus" and .env.ANTHROPIC_MODEL == "sonnet"' "$SETTINGS_FILE"
+    [ "$status" -eq 0 ]
+}
+
+@test "statusline-setup fails without writing when settings.json is malformed" {
+    mkdir -p "$(dirname "$SETTINGS_FILE")"
+    echo 'not json' > "$SETTINGS_FILE"
+
+    run run_ccswitch statusline-setup
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid settings file"* ]]
+    [ "$(cat "$SETTINGS_FILE")" = "not json" ]
+}
+
+@test "statusline-setup clears the entry an earlier version left in settings.local.json" {
+    mkdir -p "$(dirname "$LEGACY_SETTINGS_FILE")"
+    echo '{"statusLine":{"type":"command","command":"/old/statusline/ccs-statusline.sh"}}' \
+        > "$LEGACY_SETTINGS_FILE"
+
+    run run_ccswitch statusline-setup
+    [ "$status" -eq 0 ]
+    run jq 'has("statusLine")' "$LEGACY_SETTINGS_FILE"
+    [ "$output" = "false" ]
+}
+
+@test "statusline-setup --disable clears the legacy settings.local.json entry" {
+    mkdir -p "$(dirname "$LEGACY_SETTINGS_FILE")"
+    echo '{"statusLine":{"type":"command","command":"/old/statusline/ccs-statusline.sh"}}' \
+        > "$LEGACY_SETTINGS_FILE"
+
+    run run_ccswitch statusline-setup --disable
+    [ "$status" -eq 0 ]
+    run jq 'has("statusLine")' "$LEGACY_SETTINGS_FILE"
+    [ "$output" = "false" ]
+}
+
+@test "statusline-setup leaves a third-party statusline in settings.local.json alone" {
+    mkdir -p "$(dirname "$LEGACY_SETTINGS_FILE")"
+    echo '{"statusLine":{"type":"command","command":"/home/u/bin/my-ccs-statusline.sh"}}' \
+        > "$LEGACY_SETTINGS_FILE"
+
+    run run_ccswitch statusline-setup
+    [ "$status" -eq 0 ]
+    local cmd
+    cmd=$(jq -r '.statusLine.command' "$LEGACY_SETTINGS_FILE")
+    [ "$cmd" = "/home/u/bin/my-ccs-statusline.sh" ]
 }

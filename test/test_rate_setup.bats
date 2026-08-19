@@ -10,7 +10,8 @@ teardown() {
     teardown_test_env
 }
 
-SETTINGS() { echo "$HOME/.claude/settings.local.json"; }
+SETTINGS() { echo "$HOME/.claude/settings.json"; }
+LEGACY_SETTINGS() { echo "$HOME/.claude/settings.local.json"; }
 
 @test "rate-setup installs a PreToolUse hook in the nested Claude Code schema" {
     run run_ccswitch rate-setup --threshold 75
@@ -141,4 +142,71 @@ EOF
     run jq '.hooks.PreToolUse | length' "$(SETTINGS)"
     [ "$status" -eq 0 ]
     [ "$output" -eq 0 ]
+}
+
+@test "rate-setup keeps unrelated user settings" {
+    mkdir -p "$(dirname "$(SETTINGS)")"
+    echo '{"model":"opus","env":{"ANTHROPIC_MODEL":"sonnet"}}' > "$(SETTINGS)"
+
+    run run_ccswitch rate-setup
+    [ "$status" -eq 0 ]
+    run jq -e '.model == "opus" and .env.ANTHROPIC_MODEL == "sonnet"' "$(SETTINGS)"
+    [ "$status" -eq 0 ]
+}
+
+@test "rate-setup fails without enabling when settings.json is malformed" {
+    mkdir -p "$(dirname "$(SETTINGS)")"
+    echo 'not json' > "$(SETTINGS)"
+
+    run run_ccswitch rate-setup
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid settings file"* ]]
+    [ "$(cat "$(SETTINGS)")" = "not json" ]
+    run jq -r '.rateLimit.enabled // "unset"' "$SEQUENCE_FILE"
+    [ "$output" != "true" ]
+}
+
+@test "rate-setup clears the hook an earlier version left in settings.local.json" {
+    mkdir -p "$(dirname "$(LEGACY_SETTINGS)")"
+    cat > "$(LEGACY_SETTINGS)" << 'EOF'
+{"hooks":{"PreToolUse":[{"matcher":"","hooks":[
+  {"type":"command","command":"CCS_PATH=/old/bin/ccs /old/hooks/ccs-rate-hook.sh"}
+]}]}}
+EOF
+
+    run run_ccswitch rate-setup
+    [ "$status" -eq 0 ]
+
+    run jq '.hooks.PreToolUse | length' "$(LEGACY_SETTINGS)"
+    [ "$output" -eq 0 ]
+}
+
+@test "rate-setup --disable clears the legacy settings.local.json hook" {
+    mkdir -p "$(dirname "$(LEGACY_SETTINGS)")"
+    cat > "$(LEGACY_SETTINGS)" << 'EOF'
+{"hooks":{"PreToolUse":[{"matcher":"","hooks":[
+  {"type":"command","command":"CCS_PATH=/old/bin/ccs /old/hooks/ccs-rate-hook.sh"}
+]}]}}
+EOF
+
+    run run_ccswitch rate-setup --disable
+    [ "$status" -eq 0 ]
+
+    run jq '.hooks.PreToolUse | length' "$(LEGACY_SETTINGS)"
+    [ "$output" -eq 0 ]
+}
+
+@test "rate-setup leaves a third-party hook in settings.local.json alone" {
+    mkdir -p "$(dirname "$(LEGACY_SETTINGS)")"
+    cat > "$(LEGACY_SETTINGS)" << 'EOF'
+{"hooks":{"PreToolUse":[{"matcher":"","hooks":[
+  {"type":"command","command":"/home/u/bin/my-ccs-rate-hook.sh"}
+]}]}}
+EOF
+
+    run run_ccswitch rate-setup
+    [ "$status" -eq 0 ]
+
+    run jq -r '.hooks.PreToolUse[0].hooks[0].command' "$(LEGACY_SETTINGS)"
+    [ "$output" = "/home/u/bin/my-ccs-rate-hook.sh" ]
 }
