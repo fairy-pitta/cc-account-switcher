@@ -659,6 +659,13 @@ usage_cache_file() {
     echo "${cache_dir%/}/claude-usage-cache.json"
 }
 
+# Max utilization % from a usage cache file, across the 5-hour and 7-day windows
+# (either may be the binding limit). Echoes the raw number, or 0 when unreadable.
+_cache_max_utilization() {
+    jq -r '[(.five_hour.utilization // 0), (.seven_day.utilization // 0)] | max' \
+        "$1" 2>/dev/null || echo "0"
+}
+
 # Round a usage percentage from the cache ("15.0") to an integer.
 #
 # Two traps here. printf's %f honors LC_NUMERIC: under a comma-decimal locale it
@@ -2239,8 +2246,7 @@ _run_detect_rate_limit() {
     rm -f "$cache_file"
     if fetch_usage_data; then
         # Weekly window matters: take the max of 5h and 7d utilization.
-        util=$(jq -r '[(.five_hour.utilization // 0), (.seven_day.utilization // 0)] | max' \
-                 "$cache_file" 2>/dev/null || echo "0")
+        util=$(_cache_max_utilization "$cache_file")
         if util_int=$(usage_to_int "$util"); then
             [[ "$util_int" -ge "$threshold" ]] && return 0
         fi
@@ -2254,18 +2260,17 @@ _run_detect_rate_limit() {
 _run_proactive_precheck() {
     local active="$1"
     local cache_file threshold util util_int email
+    [[ -z "$active" ]] && return 0
     cache_file=$(usage_cache_file)
     threshold=$(_rate_threshold)
-    [[ -f "$cache_file" ]] || return 0
     email=$(account_display_id "$active" 2>/dev/null || true)
     if [[ "$(cache_freshness "$cache_file" "$DEFAULT_CACHE_TTL" "$email" 2>/dev/null)" != "fresh" ]]; then
         return 0
     fi
-    util=$(jq -r '[(.five_hour.utilization // 0), (.seven_day.utilization // 0)] | max' \
-             "$cache_file" 2>/dev/null || echo "0")
+    util=$(_cache_max_utilization "$cache_file")
     util_int=$(usage_to_int "$util") || return 0
     if [[ "$util_int" -ge "$threshold" ]]; then
-        _rotate_to_healthy_next_account "$active" >/dev/null 2>&1 || true
+        _rotate_to_healthy_next_account "$active" "$threshold" >/dev/null 2>&1 || true
     fi
 }
 
@@ -2597,7 +2602,7 @@ _rotate_to_healthy_next_account() {
             rm -f "$cache_file"
             if fetch_usage_data; then
                 local new_usage new_usage_int
-                new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
+                new_usage=$(_cache_max_utilization "$cache_file")
                 if new_usage_int=$(usage_to_int "$new_usage"); then
                     [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
                 else

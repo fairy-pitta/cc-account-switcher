@@ -386,3 +386,53 @@ M
     [ "$status" -eq 0 ]
     [[ "$output" == *"ran-on-2"* ]]
 }
+
+@test "run respects a caller-provided CLAUDE_CODE_RETRY_WATCHDOG" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "WD=${CLAUDE_CODE_RETRY_WATCHDOG:-unset}"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+    CLAUDE_CODE_RETRY_WATCHDOG=1 run run_ccswitch run --no-proactive -- claude -p "hi"
+    [[ "$output" == *"WD=1"* ]]
+}
+
+@test "run does not proactively rotate when active account is under threshold" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    create_fake_usage_cache "10.0" "a@example.com"
+    local u; u=$(jq '.rateLimit={enabled:true,threshold:80}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+echo "ran-on-\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")"
+M
+    chmod +x "$MOCK_BIN/claude"
+    run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ran-on-1"* ]]
+}
+
+@test "run does not proactively rotate on a stale cache" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    create_fake_usage_cache "99.0" "a@example.com"
+    # Force staleness: set cached_at to epoch 1970 so age >> DEFAULT_CACHE_TTL.
+    local c; c=$(jq '.cached_at = 1' "$CCS_USAGE_CACHE"); echo "$c" > "$CCS_USAGE_CACHE"
+    local u; u=$(jq '.rateLimit={enabled:true,threshold:80}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+echo "ran-on-\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")"
+M
+    chmod +x "$MOCK_BIN/claude"
+    run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ran-on-1"* ]]
+}
