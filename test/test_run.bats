@@ -329,3 +329,60 @@ M
     [[ "$output" == *"A1GOT:the-secret-prompt"* ]]
     [[ "$output" == *"GOT:the-secret-prompt"* ]]
 }
+
+# --- retry env + proactive ---------------------------------------------------
+
+@test "run bounds the child's internal retries via env by default" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "MAX=${CLAUDE_CODE_MAX_RETRIES:-unset} WD=${CLAUDE_CODE_RETRY_WATCHDOG:-unset}"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"MAX=3 WD=0"* ]]
+}
+
+@test "run respects a caller-provided CLAUDE_CODE_MAX_RETRIES" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "MAX=${CLAUDE_CODE_MAX_RETRIES:-unset}"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    CLAUDE_CODE_MAX_RETRIES=9 run run_ccswitch run --no-proactive -- claude -p "hi"
+    [[ "$output" == *"MAX=9"* ]]
+}
+
+@test "run proactively rotates before attempt 1 when the active account is over threshold" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    create_fake_usage_cache "99.0" "a@example.com"
+    local u; u=$(jq '.rateLimit={enabled:true,threshold:80}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+echo "ran-on-\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")"
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ran-on-2"* ]]
+}

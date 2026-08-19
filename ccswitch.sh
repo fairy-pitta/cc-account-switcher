@@ -2248,11 +2248,32 @@ _run_detect_rate_limit() {
     return 1
 }
 
+# Before the first attempt, if the active account is already over the proactive
+# threshold per the (fresh-enough) cache, rotate off it so we don't burn an
+# attempt on a known-exhausted account. Best-effort: silent on any failure.
+_run_proactive_precheck() {
+    local active="$1"
+    local cache_file threshold util util_int email
+    cache_file=$(usage_cache_file)
+    threshold=$(_rate_threshold)
+    [[ -f "$cache_file" ]] || return 0
+    email=$(account_display_id "$active" 2>/dev/null || true)
+    if [[ "$(cache_freshness "$cache_file" "$DEFAULT_CACHE_TTL" "$email" 2>/dev/null)" != "fresh" ]]; then
+        return 0
+    fi
+    util=$(jq -r '[(.five_hour.utilization // 0), (.seven_day.utilization // 0)] | max' \
+             "$cache_file" 2>/dev/null || echo "0")
+    util_int=$(usage_to_int "$util") || return 0
+    if [[ "$util_int" -ge "$threshold" ]]; then
+        _rotate_to_healthy_next_account "$active" >/dev/null 2>&1 || true
+    fi
+}
+
 # Run a command (typically `claude -p ...`) on the active account, switching to
 # another account and retrying when it fails because of a rate limit.
 # Usage: ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC]
 #                [--no-proactive] -- <command...>
-# shellcheck disable=SC2034  # limit_threshold/timeout_sec/proactive used in later tasks
+# shellcheck disable=SC2034  # limit_threshold/timeout_sec used in later tasks
 cmd_run() {
     local max_attempts="" limit_threshold="95" timeout_sec="" proactive=true
     local -a cmd=()
@@ -2309,13 +2330,22 @@ cmd_run() {
         local started_account
         started_account=$(effective_active_account_num)
 
+        if [[ $attempt -eq 1 && "$proactive" == true ]]; then
+            _run_proactive_precheck "$started_account"
+            started_account=$(effective_active_account_num)
+        fi
+
         : > "$out_buf"; : > "$err_buf"
         local rc=0
-        if [[ -n "$stdin_spool" ]]; then
-            "${cmd[@]}" <"$stdin_spool" >"$out_buf" 2>"$err_buf" || rc=$?
-        else
-            "${cmd[@]}" >"$out_buf" 2>"$err_buf" || rc=$?
-        fi
+        (
+            export CLAUDE_CODE_MAX_RETRIES="${CLAUDE_CODE_MAX_RETRIES:-3}"
+            export CLAUDE_CODE_RETRY_WATCHDOG="${CLAUDE_CODE_RETRY_WATCHDOG:-0}"
+            if [[ -n "$stdin_spool" ]]; then
+                exec "${cmd[@]}" <"$stdin_spool"
+            else
+                exec "${cmd[@]}"
+            fi
+        ) >"$out_buf" 2>"$err_buf" || rc=$?
         cat "$err_buf" >&2
 
         if [[ $rc -eq 0 ]]; then
