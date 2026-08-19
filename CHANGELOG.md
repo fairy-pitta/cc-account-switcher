@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-19
+
 ### Added
 
-- `ccs run -- <command...>` runs a command (typically `claude -p`) on the active account and, when it fails because the account is rate-limited, switches to the next healthy account and retries. Detection is format-agnostic (greps the failed run's output for `429`/`rate_limit`/`overloaded`/`usage limit`, with a usage-API check as fallback), so it complements the proactive PreToolUse hook — which structurally cannot see a mid-turn 429 — for headless orchestrators. stdin is replayed per attempt, only the successful attempt's stdout is emitted, internal Claude retries are bounded, `--timeout` reaps the child's process group, and exhaustion prints a machine-readable `ccs-run: exhausted …` line (exit 3). Note: retries can duplicate side effects of a partially-run command
+- `ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC] [--no-proactive] [--no-stdin] -- <command...>` runs a command (typically `claude -p`) on the active account and, when it fails because the account is rate-limited, switches to the next healthy account and retries — the *reactive* complement to the proactive PreToolUse hook, which structurally cannot see a mid-turn 429. Detection is format-agnostic (greps the failed run's stderr and final stdout lines for `(429)`/`rate-limit`/`overloaded`/`usage limit`, with a usage-API fallback over the max of the 5-hour and 7-day windows). stdin is spooled and replayed per attempt (or skipped with `--no-stdin`, recommended for prompt-as-argument headless use), only the successful attempt's stdout is emitted, internal Claude retries are bounded, and `--timeout` runs the child in its own process group and escalates SIGTERM→SIGKILL. Machine-readable stderr lines and distinct exit codes let orchestrators branch: `0` success, the command's own code on a non-limit failure, `124` timeout, `3` all accounts exhausted, `4` `--max-attempts` reached (a healthy account remains), `2` internal switch error. Note: a retry re-runs the command, so side effects of a partially-run attempt can duplicate ([#50](https://github.com/fairy-pitta/cc-account-switcher/pull/50))
 
 ## [0.6.0] - 2026-08-19
 
@@ -126,7 +128,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - macOS Keychain integration
 - Linux credential file support
 
-[Unreleased]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.5.0...v0.6.0
 [0.3.1]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fairy-pitta/cc-account-switcher/compare/v0.2.0...v0.3.0
