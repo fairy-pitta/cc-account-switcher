@@ -436,3 +436,43 @@ M
     [ "$status" -eq 0 ]
     [[ "$output" == *"ran-on-1"* ]]
 }
+
+# --- timeout + signals -------------------------------------------------------
+
+@test "run kills a child that exceeds --timeout and passes 124 through" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+sleep 30
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
+    [ "$status" -eq 124 ]
+}
+
+@test "run treats a timed-out child that was mid-rate-limit as a rate limit" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+if [[ "\$active" == "1" ]]; then echo "Retrying in 2s attempt 1/3" >&2; sleep 30; fi
+echo "ok-on-\$active"
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok-on-2"* ]]
+}

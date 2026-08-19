@@ -2278,7 +2278,6 @@ _run_proactive_precheck() {
 # another account and retrying when it fails because of a rate limit.
 # Usage: ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC]
 #                [--no-proactive] -- <command...>
-# shellcheck disable=SC2034  # limit_threshold/timeout_sec used in later tasks
 cmd_run() {
     local max_attempts="" limit_threshold="95" timeout_sec="" proactive=true
     local -a cmd=()
@@ -2308,22 +2307,33 @@ cmd_run() {
     [[ -z "$max_attempts" ]] && max_attempts="$total"
     [[ "$max_attempts" -lt 1 ]] && max_attempts=1
 
+    # Create buffers first so cleanup function can reference them unconditionally.
+    local out_buf err_buf
+    out_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-out.XXXXXX")
+    err_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-err.XXXXXX")
+
     # Spool non-tty stdin so every attempt replays byte-identical input. A live
     # pipe would be drained by attempt 1; a concurrent tee could truncate on
     # SIGPIPE if attempt 1 exits early. Read it fully up front instead.
-    local stdin_spool=""
+    local stdin_spool="" child_pid="" watchdog_pid=""
+
+    # Unified cleanup: kill any live watchdog/child and remove all temp files.
+    _ccs_run_cleanup() {
+        [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null
+        [[ -n "$child_pid" ]]    && kill -TERM "$child_pid" 2>/dev/null
+        rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}
+    }
+    trap '_ccs_run_cleanup; trap - INT TERM; exit 130' INT
+    trap '_ccs_run_cleanup; trap - INT TERM; exit 143' TERM
+
     if [[ ! -t 0 ]]; then
         stdin_spool=$(mktemp "${TMPDIR:-/tmp}/ccs-run-stdin.XXXXXX") || {
             echo "ccs-run: failed to create stdin spool file" >&2
-            return 1
+            _ccs_run_cleanup; trap - INT TERM; return 1
         }
         chmod 600 "$stdin_spool"
         cat > "$stdin_spool"
     fi
-
-    local out_buf err_buf
-    out_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-out.XXXXXX")
-    err_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-err.XXXXXX")
 
     local attempt=0
     while [[ $attempt -lt $max_attempts ]]; do
@@ -2341,7 +2351,7 @@ cmd_run() {
         fi
 
         : > "$out_buf"; : > "$err_buf"
-        local rc=0
+        local rc=0 timed_out=0
         (
             export CLAUDE_CODE_MAX_RETRIES="${CLAUDE_CODE_MAX_RETRIES:-3}"
             export CLAUDE_CODE_RETRY_WATCHDOG="${CLAUDE_CODE_RETRY_WATCHDOG:-0}"
@@ -2350,15 +2360,40 @@ cmd_run() {
             else
                 exec "${cmd[@]}"
             fi
-        ) >"$out_buf" 2>"$err_buf" || rc=$?
+        ) >"$out_buf" 2>"$err_buf" &
+        child_pid=$!
+
+        if [[ -n "$timeout_sec" ]]; then
+            ( sleep "$timeout_sec"; kill -TERM "$child_pid" 2>/dev/null ) &
+            watchdog_pid=$!
+        fi
+        wait "$child_pid" || rc=$?
+        child_pid=""
+        if [[ -n "$watchdog_pid" ]]; then
+            if kill -0 "$watchdog_pid" 2>/dev/null; then
+                kill "$watchdog_pid" 2>/dev/null    # child finished first
+            else
+                timed_out=1                           # watchdog already fired
+            fi
+            wait "$watchdog_pid" 2>/dev/null || true
+            watchdog_pid=""
+        fi
         cat "$err_buf" >&2
 
         if [[ $rc -eq 0 ]]; then
-            cat "$out_buf"; rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return 0
+            cat "$out_buf"; _ccs_run_cleanup; trap - INT TERM; return 0
         fi
 
-        if ! _run_detect_rate_limit "$out_buf" "$err_buf" "$started_account" "$limit_threshold"; then
-            cat "$out_buf"; rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return "$rc"
+        if [[ $timed_out -eq 1 ]]; then
+            # A child killed mid-backoff is a paradigm rate-limit case: consult
+            # the buffered output before giving up.
+            if ! _run_detect_rate_limit "$out_buf" "$err_buf" "$started_account" "$limit_threshold"; then
+                echo "ccs-run: timeout attempts=$attempt" >&2
+                _ccs_run_cleanup; trap - INT TERM; return 124
+            fi
+            # else: fall through to rotation logic below (treat as rate-limited)
+        elif ! _run_detect_rate_limit "$out_buf" "$err_buf" "$started_account" "$limit_threshold"; then
+            cat "$out_buf"; _ccs_run_cleanup; trap - INT TERM; return "$rc"
         fi
 
         # PIN 2: capture the helper's rc set-e-safely.
@@ -2367,14 +2402,14 @@ cmd_run() {
         case "$hrc" in
             0|3) : ;;   # switched-healthy, or someone-else-rotated: retry either way
             2)  echo "ccs-run: switch-error attempts=$attempt" >&2
-                rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return 2 ;;
+                _ccs_run_cleanup; trap - INT TERM; return 2 ;;
             *)  echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
-                rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return 3 ;;
+                _ccs_run_cleanup; trap - INT TERM; return 3 ;;
         esac
     done
 
     echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
-    rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}; return 3
+    _ccs_run_cleanup; trap - INT TERM; return 3
 }
 
 # --- Endpoint health probe ------------------------------------------------
