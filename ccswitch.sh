@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # Version
-readonly VERSION="0.6.0"
+readonly VERSION="0.7.0"
 
 # Configuration
 readonly BACKUP_DIR="$HOME/.claude-switch-backup"
