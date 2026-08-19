@@ -588,3 +588,30 @@ M
     # It rotated to the healthy account 2 (available for the caller's next run).
     [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 2 ]
 }
+
+@test "run --timeout escalates to SIGKILL for a child that ignores SIGTERM" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    # A child that traps and ignores SIGTERM, then sleeps.
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+trap '' TERM
+sleep 30
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    local start=$SECONDS
+    run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
+    local elapsed=$(( SECONDS - start ))
+    [ "$status" -eq 124 ]
+    [ "$elapsed" -lt 10 ]
+}
+
+@test "run errors cleanly when --timeout is given without a value" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --timeout
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"requires a value"* ]]
+}

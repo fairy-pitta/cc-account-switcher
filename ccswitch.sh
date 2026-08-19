@@ -2283,9 +2283,16 @@ cmd_run() {
     local -a cmd=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --max-attempts)    max_attempts="$2"; shift 2 ;;
-            --limit-threshold) limit_threshold="$2"; shift 2 ;;
-            --timeout)         timeout_sec="$2"; shift 2 ;;
+            --max-attempts|--limit-threshold|--timeout)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: $1 requires a value" >&2; exit 2
+                fi
+                case "$1" in
+                    --max-attempts)    max_attempts="$2" ;;
+                    --limit-threshold) limit_threshold="$2" ;;
+                    --timeout)         timeout_sec="$2" ;;
+                esac
+                shift 2 ;;
             --no-proactive)    proactive=false; shift ;;
             --no-stdin)        no_stdin=true; shift ;;
             --)                shift; cmd=("$@"); break ;;
@@ -2427,7 +2434,11 @@ cmd_run() {
             # kill-0 race. The flag was truncated at the top of this attempt.
             ( sleep "$timeout_sec"
               echo 1 > "$timeout_flag" 2>/dev/null
-              kill -TERM -"$child_pid" 2>/dev/null ) &
+              kill -TERM -"$child_pid" 2>/dev/null
+              # Escalate: a child that traps/ignores SIGTERM would otherwise keep
+              # the parent blocked in `wait`, so `--timeout` would not bound it.
+              sleep 2
+              kill -KILL -"$child_pid" 2>/dev/null ) &
             watchdog_pid=$!
         fi
         wait "$child_pid" || rc=$?
