@@ -658,6 +658,27 @@ usage_cache_file() {
     echo "${cache_dir%/}/claude-usage-cache.json"
 }
 
+# Round a usage percentage from the cache ("15.0") to an integer.
+#
+# Two traps here. printf's %f honors LC_NUMERIC: under a comma-decimal locale it
+# prints a partial result and *then* fails on a dot-decimal string, so the locale
+# is pinned to C. The pin is a statement inside the subshell, not an `LC_ALL=C
+# printf` command prefix: bash 3.2 (macOS /bin/bash) does not re-run setlocale
+# for a transient assignment to a builtin, so the prefix form still fails there.
+# And the fallback must stay out of the command substitution — folded in, it is
+# appended to that partial output and 15.0 reads as 150.
+#
+# Prints nothing and returns 1 when the value can't be read, so callers can tell
+# an unreadable reading from a genuine 0%. The rate hook and the statusline carry
+# their own copy of this shape: they are installed as standalone scripts and
+# cannot source this one — keep the three in sync.
+usage_to_int() {
+    local raw="$1" rounded
+    rounded=$(LC_ALL=C; printf '%.0f' "$raw" 2>/dev/null) || return 1
+    [[ "$rounded" =~ ^-?[0-9]+$ ]] || return 1
+    printf '%s\n' "$rounded"
+}
+
 # write_endpoint_env <base_url> <token_header: api_key|auth_token> <token> <model-or-empty>
 write_endpoint_env() {
     local base_url="$1" token_header="$2" token="$3" model="$4"
@@ -2437,7 +2458,15 @@ cmd_rate_check() {
     # Read utilization
     local usage
     usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
-    usage_int=$(printf "%.0f" "$usage" 2>/dev/null || echo "0")
+    if ! usage_int=$(usage_to_int "$usage"); then
+        # A reading we can't parse is not 0% — treating it as one would keep us
+        # silently under every threshold. Refuse to act on it instead.
+        if [[ "$hook_mode" == true ]]; then
+            exit 0  # Fail open
+        fi
+        echo "Error: Unreadable usage value in cache: $usage" >&2
+        exit 2
+    fi
 
     # Below threshold — all good
     if [[ "$usage_int" -lt "$threshold" ]]; then
@@ -2508,8 +2537,12 @@ cmd_rate_check() {
                 if fetch_usage_data; then
                     local new_usage new_usage_int
                     new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
-                    new_usage_int=$(printf "%.0f" "$new_usage" 2>/dev/null || echo "0")
-                    [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
+                    if new_usage_int=$(usage_to_int "$new_usage"); then
+                        [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
+                    else
+                        # Unreadable usage — same as a failed fetch: assume OK.
+                        healthy=true
+                    fi
                 else
                     # Can't verify usage; assume OK (matches prior behavior).
                     healthy=true
