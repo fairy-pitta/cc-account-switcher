@@ -2377,6 +2377,78 @@ fetch_usage_data() {
     return 0
 }
 
+# The configured rate-limit threshold, or 80.
+_rate_threshold() {
+    local t=""
+    if [[ -f "$SEQUENCE_FILE" ]]; then
+        t=$(jq -r '.rateLimit.threshold // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    fi
+    echo "${t:-80}"
+}
+
+# Rotate the shared active account to the next healthy one in the sequence.
+# Silent, no restart, no hook messaging — those stay with the caller.
+# Arg 1: expected_active — the account number the caller believes is live; the
+#        first hop is a compare-and-swap against it (see perform_switch).
+# Returns: 0 switched to a healthy account; 1 all others exhausted;
+#          2 switch error; 3 lost race (someone else already rotated).
+_rotate_to_healthy_next_account() {
+    local expected_active="$1"
+    local total_accounts
+    total_accounts=$(jq '.sequence | length' "$SEQUENCE_FILE" 2>/dev/null || echo "0")
+    [[ "$total_accounts" -lt 2 ]] && return 1
+
+    local threshold cache_file
+    threshold=$(_rate_threshold)
+    cache_file=$(usage_cache_file)
+
+    local attempts=0 max_attempts=$((total_accounts - 1))
+    local first_hop="$expected_active"
+    while [[ $attempts -lt $max_attempts ]]; do
+        local active_account next_account
+        active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+        next_account=$(jq -r --argjson active "$active_account" '
+            .sequence as $seq |
+            ($seq | index($active) // 0) as $idx |
+            $seq[($idx + 1) % ($seq | length)]
+        ' "$SEQUENCE_FILE")
+
+        # Only the first hop carries the CAS; subsequent hops within this call
+        # already own the account, so pass no expectation.
+        # Use ||rc=$? (not $()) so set -e doesn't abort on a non-zero exit.
+        local rc=0
+        (CCS_SILENT=1 perform_switch "$next_account" "$first_hop") >/dev/null 2>&1 || rc=$?
+        first_hop=""
+        case "$rc" in
+            0) : ;;
+            3) return 3 ;;
+            *) return 2 ;;
+        esac
+
+        local healthy=false
+        if is_endpoint_account "$next_account"; then
+            if probe_endpoint_health "$next_account"; then healthy=true; fi
+        else
+            rm -f "$cache_file"
+            if fetch_usage_data; then
+                local new_usage new_usage_int
+                new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
+                if new_usage_int=$(usage_to_int "$new_usage"); then
+                    [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
+                else
+                    healthy=true
+                fi
+            else
+                healthy=true
+            fi
+        fi
+
+        [[ "$healthy" == true ]] && return 0
+        attempts=$((attempts + 1))
+    done
+    return 1
+}
+
 # Rate limit check command
 # Usage: ccs rate-check [--threshold N] [--auto-switch] [--hook-mode] [--refresh] [--max-age SECONDS]
 # Exit codes: 0=ok, 1=exceeded (switched if --auto-switch), 2=error, 3=all accounts limited
@@ -2553,52 +2625,14 @@ cmd_rate_check() {
         local resume_sid
         resume_sid=$(capture_resume_session_id)
 
-        # Try switching to next accounts (up to N-1 attempts)
-        local attempts=0
-        local max_attempts=$((total_accounts - 1))
+        local hrc=0
+        _rotate_to_healthy_next_account "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" || hrc=$?
 
-        while [[ $attempts -lt $max_attempts ]]; do
-            local active_account next_account next_email
-            active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-            next_account=$(jq -r --argjson active "$active_account" '
-                .sequence as $seq |
-                ($seq | index($active) // 0) as $idx |
-                $seq[($idx + 1) % ($seq | length)]
-            ' "$SEQUENCE_FILE")
-            next_email=$(account_display_id "$next_account")
-
-            # Perform switch in subshell to catch exit 1 from perform_switch
-            if ! (CCS_SILENT=1 perform_switch "$next_account"); then
-                # Switch failed — fail open in hook mode
-                if [[ "$hook_mode" == true ]]; then
-                    exit 0
-                fi
-                echo "Error: Failed to switch to Account-$next_account ($next_email)" >&2
-                exit 2
-            fi
-
-            # Verify the candidate by type: probe endpoints, usage-check oauth.
-            local healthy=false
-            if is_endpoint_account "$next_account"; then
-                if probe_endpoint_health "$next_account"; then healthy=true; fi
-            else
-                rm -f "$cache_file"
-                if fetch_usage_data; then
-                    local new_usage new_usage_int
-                    new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
-                    if new_usage_int=$(usage_to_int "$new_usage"); then
-                        [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
-                    else
-                        # Unreadable usage — same as a failed fetch: assume OK.
-                        healthy=true
-                    fi
-                else
-                    # Can't verify usage; assume OK (matches prior behavior).
-                    healthy=true
-                fi
-            fi
-
-            if [[ "$healthy" == true ]]; then
+        case "$hrc" in
+            0)
+                local next_account next_email
+                next_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+                next_email=$(account_display_id "$next_account")
                 if [[ "$hook_mode" == true ]]; then
                     local next_step="Please restart Claude Code."
                     if [[ -n "$resume_sid" ]]; then
@@ -2610,18 +2644,21 @@ cmd_rate_check() {
                 echo "Switched to Account-$next_account ($next_email)"
                 handle_restart_after_switch
                 exit 1
-            fi
-
-            attempts=$((attempts + 1))
-        done
-
-        # All accounts are limited
-        if [[ "$hook_mode" == true ]]; then
-            _rate_hook_deny "Rate limit exceeded on all accounts (${usage_int}%). Please wait for limits to reset."
-            exit 0
-        fi
-        echo "All accounts are above the threshold" >&2
-        exit 3
+                ;;
+            2)
+                if [[ "$hook_mode" == true ]]; then exit 0; fi
+                echo "Error: Failed to switch accounts" >&2
+                exit 2
+                ;;
+            *)
+                if [[ "$hook_mode" == true ]]; then
+                    _rate_hook_deny "Rate limit exceeded on all accounts (${usage_int}%). Please wait for limits to reset."
+                    exit 0
+                fi
+                echo "All accounts are above the threshold" >&2
+                exit 3
+                ;;
+        esac
     fi
 
     # No auto-switch, just report
