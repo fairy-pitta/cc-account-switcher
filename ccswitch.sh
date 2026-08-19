@@ -2234,7 +2234,7 @@ cmd_run() {
         exit 2
     fi
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
-        echo "Error: no accounts are managed yet" >&2
+        echo "Error: No accounts are managed yet" >&2
         exit 2
     fi
     setup_directories
@@ -2248,8 +2248,8 @@ cmd_run() {
     local out_buf
     out_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-out.XXXXXX")
 
-    "${cmd[@]}" >"$out_buf" 2>&1
-    local rc=$?
+    local rc=0
+    "${cmd[@]}" >"$out_buf" 2>&1 || rc=$?
     if [[ $rc -eq 0 ]]; then
         cat "$out_buf"; rm -f "$out_buf"; return 0
     fi

@@ -171,3 +171,14 @@ M
     [ "$status" -eq 2 ]
     [[ "$output" == *"Usage: ccs run"* ]]
 }
+
+@test "run passes through the command's exit code and output on failure" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    install_mock_claude
+
+    CLAUDE_MOCK_EXIT=7 CLAUDE_MOCK_STDOUT="partial-output" run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 7 ]
+    [[ "$output" == *"partial-output"* ]]
+}
