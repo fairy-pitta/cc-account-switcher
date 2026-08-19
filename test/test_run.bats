@@ -289,6 +289,7 @@ M
     chmod +x "$MOCK_BIN/curl"
     cat > "$MOCK_BIN/claude" << 'M'
 #!/bin/bash
+echo "FAILED-STDOUT-SHOULD-NOT-APPEAR"
 echo "API Error: Request rejected (429)" >&2
 exit 1
 M
@@ -297,4 +298,5 @@ M
     run run_ccswitch run --no-proactive -- claude -p "hi"
     [ "$status" -eq 3 ]
     [[ "$output" == *"ccs-run: exhausted"* ]]
+    [[ "$output" != *"FAILED-STDOUT-SHOULD-NOT-APPEAR"* ]]
 }

@@ -2315,14 +2315,14 @@ cmd_run() {
         case "$hrc" in
             0|3) : ;;   # switched-healthy, or someone-else-rotated: retry either way
             2)  echo "ccs-run: switch-error attempts=$attempt" >&2
-                cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return 2 ;;
+                rm -f "$out_buf" "$err_buf"; return 2 ;;
             *)  echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
-                cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return 3 ;;
+                rm -f "$out_buf" "$err_buf"; return 3 ;;
         esac
     done
 
     echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
-    cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return 3
+    rm -f "$out_buf" "$err_buf"; return 3
 }
 
 # --- Endpoint health probe ------------------------------------------------
