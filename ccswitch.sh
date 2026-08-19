@@ -2210,6 +2210,44 @@ cmd_exec() {
     fi
 }
 
+# Rate-limit markers, anchored on Claude Code's documented shapes. Extend freely.
+readonly CCS_RATE_LIMIT_RE='API Error:.*\(429\)|Request rejected \(429\)|Retrying in .*attempt|rate.limit|overloaded|usage limit'
+
+# Decide whether a failed run failed because of a rate limit.
+# Args: <stdout-buffer> <stderr-buffer> <active-account-num> <limit-threshold>
+# Returns 0 (rate-limited) or 1 (not).
+_run_detect_rate_limit() {
+    local out_buf="$1" err_buf="$2" account="$3" threshold="$4"
+
+    # PRIMARY (grep): all of stderr, plus only the final result/error line(s) of
+    # stdout — not the whole body — so a payload that merely discusses 429 does
+    # not trigger.
+    if grep -qiE "$CCS_RATE_LIMIT_RE" "$err_buf" 2>/dev/null; then
+        return 0
+    fi
+    if tail -n 3 "$out_buf" 2>/dev/null | grep -qiE "$CCS_RATE_LIMIT_RE"; then
+        return 0
+    fi
+
+    # SECONDARY (usage/health): only reached when the grep was inconclusive.
+    if [[ -n "$account" ]] && is_endpoint_account "$account"; then
+        probe_endpoint_health "$account" || return 0   # unhealthy endpoint = limited
+        return 1
+    fi
+    local cache_file util util_int
+    cache_file=$(usage_cache_file)
+    rm -f "$cache_file"
+    if fetch_usage_data; then
+        # Weekly window matters: take the max of 5h and 7d utilization.
+        util=$(jq -r '[(.five_hour.utilization // 0), (.seven_day.utilization // 0)] | max' \
+                 "$cache_file" 2>/dev/null || echo "0")
+        if util_int=$(usage_to_int "$util"); then
+            [[ "$util_int" -ge "$threshold" ]] && return 0
+        fi
+    fi
+    return 1
+}
+
 # Run a command (typically `claude -p ...`) on the active account, switching to
 # another account and retrying when it fails because of a rate limit.
 # Usage: ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC]

@@ -182,3 +182,42 @@ M
     [ "$status" -eq 7 ]
     [[ "$output" == *"partial-output"* ]]
 }
+
+# --- detection ---------------------------------------------------------------
+
+run_ccswitch_detect() {
+    # args: <stdout-content> <stderr-content>; returns 0 if rate-limited
+    local so="$1" se="$2"
+    HOME="$TEST_HOME" PATH="$MOCK_BIN:$ORIGINAL_PATH" /bin/bash -c '
+        CCS_TEST_FUNC=1
+        source "'"$CCSWITCH_SCRIPT"'"
+        obuf=$(mktemp); ebuf=$(mktemp)
+        printf "%s\n" "$1" > "$obuf"; printf "%s\n" "$2" > "$ebuf"
+        _run_detect_rate_limit "$obuf" "$ebuf" "" "95"
+        rc=$?; rm -f "$obuf" "$ebuf"; exit $rc
+    ' _ "$so" "$se"
+}
+
+@test "detect: 429 API error on stderr is a rate limit" {
+    run run_ccswitch_detect "" "API Error: Request rejected (429) rate_limit"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect: overloaded on stderr is a rate limit" {
+    run run_ccswitch_detect "" "Error: overloaded"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect: an ordinary error is not a rate limit" {
+    run run_ccswitch_detect "" "Error: ENOENT no such file"
+    [ "$status" -ne 0 ]
+}
+
+@test "detect: the word 429 buried early in stdout body does not fire" {
+    run run_ccswitch_detect "http 429 appears here in a log excerpt
+clean line 2
+clean line 3
+clean line 4
+final result: ok" ""
+    [ "$status" -ne 0 ]
+}
