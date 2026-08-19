@@ -526,3 +526,65 @@ M
     [ "$status" -eq 0 ]
     [[ "$output" == *"ARGS:-p hi --resume SID --no-restart"* ]]
 }
+
+# --- stdin modes + validation + max-attempts contract ------------------------
+
+@test "run --no-stdin feeds the child /dev/null and does not read stdin" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+got=$(cat); echo "GOT:[$got]"; exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+    # Pipe data in; --no-stdin must ignore it and the child must see empty stdin.
+    run bash -c 'printf "ignored-input" | HOME="'"$TEST_HOME"'" PATH="'"$MOCK_BIN:$ORIGINAL_PATH"'" /bin/bash "'"$CCSWITCH_SCRIPT"'" run --no-proactive --no-stdin -- claude -p "hi"'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GOT:[]"* ]]
+}
+
+@test "run rejects a non-numeric --max-attempts" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --max-attempts abc -- claude -p hi
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"positive integer"* ]]
+}
+
+@test "run rejects a non-numeric --limit-threshold" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --limit-threshold xx -- claude -p hi
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"non-negative integer"* ]]
+}
+
+@test "run reports max-attempts (exit 4) distinctly from all-exhausted, leaving a healthy account active" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    # Candidate account 2 is healthy.
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    # Account 1 rate-limits; --max-attempts 1 means we rotate once but don't retry.
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+if [[ "\$active" == "1" ]]; then echo "API Error: Request rejected (429)" >&2; exit 1; fi
+echo "ok-on-\$active"
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive --max-attempts 1 -- claude -p "hi"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"ccs-run: max-attempts"* ]]
+    [[ "$output" != *"ccs-run: exhausted"* ]]
+    # It rotated to the healthy account 2 (available for the caller's next run).
+    [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 2 ]
+}

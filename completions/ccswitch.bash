@@ -41,7 +41,7 @@ _ccswitch() {
             return 0
             ;;
         run)
-            COMPREPLY=($(compgen -W "--max-attempts --limit-threshold --timeout --no-proactive --" -- "$cur"))
+            COMPREPLY=($(compgen -W "--max-attempts --limit-threshold --timeout --no-proactive --no-stdin --" -- "$cur"))
             return 0
             ;;
         to|--switch-to|rm|--remove-account|profile|--set-profile)

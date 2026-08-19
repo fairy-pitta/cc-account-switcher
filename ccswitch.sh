@@ -2218,7 +2218,7 @@ cmd_exec() {
 }
 
 # Rate-limit markers, anchored on Claude Code's documented shapes. Extend freely.
-readonly CCS_RATE_LIMIT_RE='API Error:.*\(429\)|Request rejected \(429\)|Retrying in .*attempt|rate[_ ]limit|overloaded|usage limit'
+readonly CCS_RATE_LIMIT_RE='API Error:.*\(429\)|Request rejected \(429\)|Retrying in .*attempt|rate[-_ ]limit|overloaded|usage limit'
 
 # Decide whether a failed run failed because of a rate limit.
 # Args: <stdout-buffer> <stderr-buffer> <active-account-num> <limit-threshold>
@@ -2279,7 +2279,7 @@ _run_proactive_precheck() {
 # Usage: ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC]
 #                [--no-proactive] -- <command...>
 cmd_run() {
-    local max_attempts="" limit_threshold="95" timeout_sec="" proactive=true
+    local max_attempts="" limit_threshold="95" timeout_sec="" proactive=true no_stdin=false
     local -a cmd=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2287,6 +2287,7 @@ cmd_run() {
             --limit-threshold) limit_threshold="$2"; shift 2 ;;
             --timeout)         timeout_sec="$2"; shift 2 ;;
             --no-proactive)    proactive=false; shift ;;
+            --no-stdin)        no_stdin=true; shift ;;
             --)                shift; cmd=("$@"); break ;;
             *)  echo "Error: unknown option '$1' (put the command after --)" >&2; exit 2 ;;
         esac
@@ -2302,6 +2303,14 @@ cmd_run() {
     fi
     if [[ -n "$timeout_sec" && ! "$timeout_sec" =~ ^[1-9][0-9]*$ ]]; then
         echo "Error: --timeout must be a positive integer (seconds)" >&2
+        exit 2
+    fi
+    if [[ -n "$max_attempts" && ! "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: --max-attempts must be a positive integer" >&2
+        exit 2
+    fi
+    if [[ ! "$limit_threshold" =~ ^[0-9]+$ ]]; then
+        echo "Error: --limit-threshold must be a non-negative integer" >&2
         exit 2
     fi
     setup_directories
@@ -2336,13 +2345,38 @@ cmd_run() {
     trap '_ccs_run_cleanup; trap - INT TERM; exit 130' INT
     trap '_ccs_run_cleanup; trap - INT TERM; exit 143' TERM
 
-    if [[ ! -t 0 ]]; then
+    # Decide how the child gets stdin. We only spool (to replay byte-identical
+    # input across retries) when there is a real, finite stdin stream: not a tty
+    # (a tty child under `set -m` would get SIGTTIN and hang), and not --no-stdin.
+    # Otherwise the child reads from /dev/null. Draining an inherited/held-open
+    # pipe that the command never reads would block here forever, so headless
+    # callers passing the prompt as an argument should use --no-stdin.
+    local stdin_mode="devnull"
+    if [[ "$no_stdin" != true && ! -t 0 ]]; then
+        stdin_mode="spool"
+    fi
+
+    if [[ "$stdin_mode" == "spool" ]]; then
         stdin_spool=$(mktemp "${TMPDIR:-/tmp}/ccs-run-stdin.XXXXXX") || {
             echo "ccs-run: failed to create stdin spool file" >&2
             _ccs_run_cleanup; trap - INT TERM; return 1
         }
         chmod 600 "$stdin_spool"
-        cat > "$stdin_spool"
+        if [[ -n "$timeout_sec" ]]; then
+            # Bound the spool read so a held-open pipe can't deadlock us.
+            cat > "$stdin_spool" &
+            local spool_pid=$!
+            ( sleep "$timeout_sec"; kill "$spool_pid" 2>/dev/null ) &
+            local spool_wd=$!
+            if ! wait "$spool_pid"; then
+                kill "$spool_wd" 2>/dev/null || true; wait "$spool_wd" 2>/dev/null || true
+                echo "ccs-run: timed out reading stdin" >&2
+                _ccs_run_cleanup; trap - INT TERM; return 124
+            fi
+            kill "$spool_wd" 2>/dev/null || true; wait "$spool_wd" 2>/dev/null || true
+        else
+            cat > "$stdin_spool"
+        fi
     fi
 
     local attempt=0
@@ -2370,12 +2404,17 @@ cmd_run() {
         # shells set -m produces no chatter.
         set -m
         (
+            # Bound Claude Code's own internal retry backoff so a dead account
+            # surfaces to us quickly. CLAUDE_CODE_MAX_RETRIES is honored;
+            # CLAUDE_CODE_RETRY_WATCHDOG is best-effort and may be a no-op on some
+            # versions — `--timeout` is the authoritative bound. Caller overrides
+            # are respected.
             export CLAUDE_CODE_MAX_RETRIES="${CLAUDE_CODE_MAX_RETRIES:-3}"
             export CLAUDE_CODE_RETRY_WATCHDOG="${CLAUDE_CODE_RETRY_WATCHDOG:-0}"
             if [[ -n "$stdin_spool" ]]; then
                 exec "${cmd[@]}" <"$stdin_spool"
             else
-                exec "${cmd[@]}"
+                exec "${cmd[@]}" </dev/null
             fi
         ) >"$out_buf" 2>"$err_buf" &
         child_pid=$!
@@ -2426,7 +2465,12 @@ cmd_run() {
         local hrc=0
         _rotate_to_healthy_next_account "$started_account" "$limit_threshold" >/dev/null 2>&1 || hrc=$?
         case "$hrc" in
-            0|3) : ;;   # switched-healthy, or someone-else-rotated: retry either way
+            0|3)
+                # switched-healthy, or someone-else-rotated: retry either way.
+                # Jittered backoff before the next attempt to avoid retry storms
+                # when many `ccs run` share one global account.
+                [[ $attempt -lt $max_attempts ]] && sleep "0.$(( RANDOM % 5 ))" 2>/dev/null || true
+                ;;
             2)  echo "ccs-run: switch-error attempts=$attempt" >&2
                 _ccs_run_cleanup; trap - INT TERM; return 2 ;;
             *)  echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
@@ -2434,8 +2478,11 @@ cmd_run() {
         esac
     done
 
-    echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
-    _ccs_run_cleanup; trap - INT TERM; return 3
+    # Loop exited by hitting --max-attempts after rotating to a (healthy) account
+    # we never got to retry — distinct from all-accounts-exhausted (return 3), so
+    # an orchestrator doesn't park work when a usable account remains.
+    echo "ccs-run: max-attempts accounts=$total attempts=$attempt" >&2
+    _ccs_run_cleanup; trap - INT TERM; return 4
 }
 
 # --- Endpoint health probe ------------------------------------------------
@@ -3260,6 +3307,7 @@ show_usage() {
     echo "  --limit-threshold N              ccs run: usage% for the secondary limit check (default 95)"
     echo "  --timeout SEC                    ccs run: per-attempt deadline (kills the child)"
     echo "  --no-proactive                   ccs run: skip the pre-run usage check"
+    echo "  --no-stdin                       ccs run: don't read stdin; feed the child /dev/null"
     echo "  version                          Show version number"
     echo "  help                             Show this help message"
     echo ""

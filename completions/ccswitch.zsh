@@ -121,6 +121,7 @@ _ccswitch() {
                 '--limit-threshold:Usage% for the secondary limit check (default 95)'
                 '--timeout:Per-attempt deadline in seconds (kills the child)'
                 '--no-proactive:Skip the pre-run usage check'
+                '--no-stdin:Do not read stdin; feed the child /dev/null'
             )
             _describe 'option' run_opts
             return

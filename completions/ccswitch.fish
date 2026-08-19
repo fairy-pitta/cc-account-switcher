@@ -85,3 +85,4 @@ complete -c ccs -n '__ccs_using_command run' -l max-attempts -d 'Cap total attem
 complete -c ccs -n '__ccs_using_command run' -l limit-threshold -d 'Usage% for the secondary limit check (default 95)'
 complete -c ccs -n '__ccs_using_command run' -l timeout -d 'Per-attempt deadline in seconds (kills the child)'
 complete -c ccs -n '__ccs_using_command run' -l no-proactive -d 'Skip the pre-run usage check'
+complete -c ccs -n '__ccs_using_command run' -l no-stdin -d 'Do not read stdin; feed the child /dev/null'
