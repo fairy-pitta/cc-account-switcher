@@ -236,6 +236,42 @@ It renders e.g. `ccs you@example.com · 5h 42%` and appends `(!)` once you cross
 
 > **Note (multi-account at the same time):** `ccswitch` rewrites a single machine-global credential store, so all Claude Code processes on the machine share one account at a time. Auto-switch is built for the *sequential* case — "when this account is exhausted, rotate to the next." Running different accounts in parallel requires per-process isolation via `CLAUDE_CONFIG_DIR` — see below.
 
+### Reactive auto-switch (`ccs run`)
+
+For headless orchestrators (e.g. Paperclip/Multica) running `claude -p`, the PreToolUse hook described above cannot see a 429 that arrives mid-turn. `ccs run` fills that gap: it runs a command on the active account and, when the command fails because the account is rate-limited, switches to the next healthy account and retries.
+
+```bash
+ccs run -- claude -p "summarize this repo"
+ccs run --max-attempts 3 --timeout 120 -- claude -p "..."
+```
+
+**Detection** is format-agnostic: `ccs run` greps the failed run's combined output for `429`, `rate_limit`, `overloaded`, and `usage limit`. When those strings are absent but the command still failed, it falls back to a usage-API check to determine whether the account is exhausted.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-attempts N` | number of accounts | Maximum total attempts across all accounts |
+| `--limit-threshold N` | 95 | Usage % threshold for the pre-run check |
+| `--timeout SEC` | none | Per-attempt time limit; kills the child's process group |
+| `--no-proactive` | — | Skip the pre-run usage check |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| command's own code | Non-rate-limit failure (no retry) |
+| 124 | Attempt killed by `--timeout` |
+| 3 | All accounts exhausted; a machine-readable `ccs-run: exhausted accounts=N attempts=M` line is printed to stderr |
+| 2 | Internal switch error |
+
+**stdin** is spooled to a temp file and replayed on each attempt. Only the successful attempt's stdout is emitted.
+
+> **IMPORTANT — Idempotency:** a rate-limited attempt may have already run tool calls with side effects before the limit was hit. The default retry re-runs the command from the beginning, so side effects can duplicate. Design your commands to be idempotent, or use `--max-attempts 1` to disable retries.
+
+> **IMPORTANT — Buffered stdout:** only the successful attempt's stdout is emitted. This means `--output-format stream-json` events are not streamed live, which may trip an orchestrator's inactivity timeout.
+
 ### Parallel / isolated accounts (`CLAUDE_CONFIG_DIR`)
 
 To run multiple Claude Code processes as **different** accounts at the same time (e.g. an orchestrator like Paperclip/Multica fanning out agents), give each process its own config directory instead of switching the global store:

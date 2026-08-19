@@ -3253,6 +3253,10 @@ show_usage() {
     echo "  --fork-session                   With --resume: fork into a new session (default)"
     echo "  --no-fork-session                With --resume: continue the same session"
     echo "  --allow-root                     Allow running as root (or set CCSWITCH_ALLOW_ROOT=1)"
+    echo "  --max-attempts N                 ccs run: cap attempts (default: number of accounts)"
+    echo "  --limit-threshold N              ccs run: usage% for the secondary limit check (default 95)"
+    echo "  --timeout SEC                    ccs run: per-attempt deadline (kills the child)"
+    echo "  --no-proactive                   ccs run: skip the pre-run usage check"
     echo "  version                          Show version number"
     echo "  help                             Show this help message"
     echo ""
@@ -3272,6 +3276,7 @@ show_usage() {
     echo "  ccs dir ~/work 1                           # Map ~/work to account 1"
     echo "  ccs auto                                   # Switch based on current directory"
     echo "  ccs exec 2 -- claude -p \"hi\"               # Run claude as account 2, isolated"
+    echo "  ccs run -- claude -p \"summarize\"           # Auto-switch + retry on rate limit"
     echo "  ccs rm user@example.com                    # Remove account"
 }
 

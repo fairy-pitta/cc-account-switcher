@@ -20,7 +20,7 @@ function __ccs_needs_command
     for c in $cmd[2..-1]
         switch $c
             case 'add' 'rm' 'ls' 'sw' 'to' 'profile' 'dir' 'auto' 'resume-mode' \
-                 'rate-check' 'rate-setup' 'check' 'status' 'stats' 'version' 'help'
+                 'rate-check' 'rate-setup' 'run' 'check' 'status' 'stats' 'version' 'help'
                 return 1
         end
     end
@@ -56,6 +56,7 @@ complete -c ccs -n '__ccs_needs_command' -a 'stats' -d 'Show account usage stati
 complete -c ccs -n '__ccs_needs_command' -a 'resume-mode' -d 'Show or set how --resume relaunches'
 complete -c ccs -n '__ccs_needs_command' -a 'rate-check' -d 'Check if usage exceeds rate limit'
 complete -c ccs -n '__ccs_needs_command' -a 'rate-setup' -d 'Install/remove auto-switch hook'
+complete -c ccs -n '__ccs_needs_command' -a 'run' -d 'Run a command, auto-switch + retry on rate limit'
 complete -c ccs -n '__ccs_needs_command' -a 'version' -d 'Show version information'
 complete -c ccs -n '__ccs_needs_command' -a 'help' -d 'Show help message'
 
@@ -78,3 +79,9 @@ complete -c ccs -n '__ccs_using_command profile' -f -a '(__ccs_accounts)'
 
 # Directory completion for dir first arg, then account for second
 complete -c ccs -n '__ccs_using_command dir' -F -a '(__ccs_accounts)'
+
+# Options for ccs run
+complete -c ccs -n '__ccs_using_command run' -l max-attempts -d 'Cap total attempts (default: number of accounts)'
+complete -c ccs -n '__ccs_using_command run' -l limit-threshold -d 'Usage% for the secondary limit check (default 95)'
+complete -c ccs -n '__ccs_using_command run' -l timeout -d 'Per-attempt deadline in seconds (kills the child)'
+complete -c ccs -n '__ccs_using_command run' -l no-proactive -d 'Skip the pre-run usage check'

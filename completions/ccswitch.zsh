@@ -70,6 +70,7 @@ _ccswitch() {
         'stats:Show per-account usage statistics'
         'rate-check:Check if usage exceeds rate limit threshold'
         'rate-setup:Install/remove PreToolUse hook for auto-switch'
+        'run:Run a command, auto-switch + retry on rate limit'
         'version:Show version information'
         'help:Show help message'
     )
@@ -88,7 +89,7 @@ _ccswitch() {
                 cmd="${words[$i]}"
                 break
                 ;;
-            dir|--set-dir-account|resume-mode)
+            dir|--set-dir-account|resume-mode|run)
                 cmd="${words[$i]}"
                 break
                 ;;
@@ -111,6 +112,17 @@ _ccswitch() {
         profile|--set-profile)
             # <account> <name> — the profile name is free-form, so offer nothing.
             (( arg_pos == 1 )) && _ccswitch_accounts
+            return
+            ;;
+        run)
+            local -a run_opts
+            run_opts=(
+                '--max-attempts:Cap total attempts (default: number of accounts)'
+                '--limit-threshold:Usage% for the secondary limit check (default 95)'
+                '--timeout:Per-attempt deadline in seconds (kills the child)'
+                '--no-proactive:Skip the pre-run usage check'
+            )
+            _describe 'option' run_opts
             return
             ;;
         resume-mode)
