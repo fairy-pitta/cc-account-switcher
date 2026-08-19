@@ -101,3 +101,38 @@ M
     run run_ccswitch_rotate 1
     [ "$status" -eq 1 ]
 }
+
+@test "rotate helper honors threshold passed as arg 2 over config" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    # Candidate reports 90% usage.
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":90.0,"limit":100,"used":90}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    # Config threshold 95 (90 < 95 => would be healthy), but arg 2 = 80 (90 >= 80 => exhausted).
+    # Pass empty expected_active (no CAS) so perform_switch rotates unconditionally.
+    local u; u=$(jq '.rateLimit = {enabled:true, threshold:95}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+    run run_ccswitch_rotate "" 80
+    [ "$status" -eq 1 ]
+}
+
+@test "rotate helper returns 2 when perform_switch fails (missing target credentials)" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    # Remove account 2's backup credentials from the mock keychain so perform_switch
+    # hits the "Missing backup data" branch and exits 1, causing the helper to return 2.
+    local keychain_dir="$TEST_HOME/.mock-keychain"
+    rm -f "$keychain_dir/Claude_Code-Account-2-b@example.com"
+
+    run run_ccswitch_rotate ""
+    [ "$status" -eq 2 ]
+}

@@ -2390,6 +2390,8 @@ _rate_threshold() {
 # Silent, no restart, no hook messaging — those stay with the caller.
 # Arg 1: expected_active — the account number the caller believes is live; the
 #        first hop is a compare-and-swap against it (see perform_switch).
+#        Pass empty to skip the CAS and rotate unconditionally (cmd_rate_check).
+# Arg 2: threshold — candidate over-threshold check; empty falls back to _rate_threshold().
 # Returns: 0 switched to a healthy account; 1 all others exhausted;
 #          2 switch error; 3 lost race (someone else already rotated).
 _rotate_to_healthy_next_account() {
@@ -2627,7 +2629,9 @@ cmd_rate_check() {
         resume_sid=$(capture_resume_session_id)
 
         local hrc=0
-        _rotate_to_healthy_next_account "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" "$threshold" || hrc=$?
+        # Pass empty expected_active so perform_switch skips the CAS: cmd_rate_check
+        # has no compare-and-swap semantics (that is reserved for `ccs run`).
+        _rotate_to_healthy_next_account "" "$threshold" || hrc=$?
 
         case "$hrc" in
             0)
@@ -2652,6 +2656,7 @@ cmd_rate_check() {
                 exit 2
                 ;;
             *)
+                # 1 = all exhausted (3/lost-race can't occur: cmd_rate_check passes no CAS expectation)
                 if [[ "$hook_mode" == true ]]; then
                     _rate_hook_deny "Rate limit exceeded on all accounts (${usage_int}%). Please wait for limits to reset."
                     exit 0
