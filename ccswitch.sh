@@ -659,6 +659,13 @@ usage_cache_file() {
     echo "${cache_dir%/}/claude-usage-cache.json"
 }
 
+# Max utilization % from a usage cache file, across the 5-hour and 7-day windows
+# (either may be the binding limit). Echoes the raw number, or 0 when unreadable.
+_cache_max_utilization() {
+    jq -r '[(.five_hour.utilization // 0), (.seven_day.utilization // 0)] | max' \
+        "$1" 2>/dev/null || echo "0"
+}
+
 # Round a usage percentage from the cache ("15.0") to an integer.
 #
 # Two traps here. printf's %f honors LC_NUMERIC: under a comma-decimal locale it
@@ -1730,6 +1737,7 @@ cmd_switch_to() {
 # Perform the actual account switch
 perform_switch() {
     local target_account="$1"
+    local expected_active="${2:-}"
 
     # Get current and target account info
     local current_account target_email current_email
@@ -1804,6 +1812,18 @@ perform_switch() {
             fi
             current_account="$real_current_account"
         fi
+    fi
+
+    # Compare-and-swap precondition (used by `ccs run`): only switch if the
+    # reconciled active account is still the one the caller expected. Under
+    # concurrency another switch may have already rotated the shared account;
+    # signal that with a distinct status so the caller retries without rotating.
+    # Placed AFTER reconcile (so drift can't give a false verdict) and BEFORE the
+    # no-op guard (so a concurrent switch onto our target isn't misread as our
+    # success). Release the lock first, like every other post-acquire early exit.
+    if [[ -n "$expected_active" && "$current_account" != "$expected_active" ]]; then
+        release_switch_lock
+        return 3
     fi
 
     # No-op guard: if we're already on the target (e.g. a concurrent switch beat
@@ -2197,6 +2217,292 @@ cmd_exec() {
     fi
 }
 
+# Rate-limit markers, anchored on Claude Code's documented shapes. Extend freely.
+readonly CCS_RATE_LIMIT_RE='API Error:.*\(429\)|Request rejected \(429\)|Retrying in .*attempt|rate[-_ ]limit|overloaded|usage limit'
+
+# Decide whether a failed run failed because of a rate limit.
+# Args: <stdout-buffer> <stderr-buffer> <active-account-num> <limit-threshold>
+# Returns 0 (rate-limited) or 1 (not).
+_run_detect_rate_limit() {
+    local out_buf="$1" err_buf="$2" account="$3" threshold="$4"
+
+    # PRIMARY (grep): all of stderr, plus only the final result/error line(s) of
+    # stdout — not the whole body — so a payload that merely discusses 429 does
+    # not trigger.
+    if grep -qiE "$CCS_RATE_LIMIT_RE" "$err_buf" 2>/dev/null; then
+        return 0
+    fi
+    if tail -n 3 "$out_buf" 2>/dev/null | grep -qiE "$CCS_RATE_LIMIT_RE"; then
+        return 0
+    fi
+
+    # SECONDARY (usage/health): only reached when the grep was inconclusive.
+    # This inspects the CURRENTLY-active account/credentials. If a concurrent
+    # `ccs` switched the shared account since the child ran under $account, we
+    # can't attribute usage/health to $account — don't misclassify: treat as
+    # not-rate-limited and let the caller pass the original failure through.
+    if [[ -n "$account" && "$(effective_active_account_num)" != "$account" ]]; then
+        return 1
+    fi
+    if [[ -n "$account" ]] && is_endpoint_account "$account"; then
+        probe_endpoint_health "$account" || return 0   # unhealthy endpoint = limited
+        return 1
+    fi
+    local cache_file util util_int
+    cache_file=$(usage_cache_file)
+    rm -f "$cache_file"
+    if fetch_usage_data; then
+        # Weekly window matters: take the max of 5h and 7d utilization.
+        util=$(_cache_max_utilization "$cache_file")
+        if util_int=$(usage_to_int "$util"); then
+            [[ "$util_int" -ge "$threshold" ]] && return 0
+        fi
+    fi
+    return 1
+}
+
+# Before the first attempt, if the active account is already over the proactive
+# threshold per the (fresh-enough) cache, rotate off it so we don't burn an
+# attempt on a known-exhausted account. Best-effort: silent on any failure.
+_run_proactive_precheck() {
+    local active="$1"
+    local cache_file threshold util util_int email
+    [[ -z "$active" ]] && return 0
+    cache_file=$(usage_cache_file)
+    threshold=$(_rate_threshold)
+    email=$(account_display_id "$active" 2>/dev/null || true)
+    if [[ "$(cache_freshness "$cache_file" "$DEFAULT_CACHE_TTL" "$email" 2>/dev/null)" != "fresh" ]]; then
+        return 0
+    fi
+    util=$(_cache_max_utilization "$cache_file")
+    util_int=$(usage_to_int "$util") || return 0
+    if [[ "$util_int" -ge "$threshold" ]]; then
+        _rotate_to_healthy_next_account "$active" "$threshold" >/dev/null 2>&1 || true
+    fi
+}
+
+# Run a command (typically `claude -p ...`) on the active account, switching to
+# another account and retrying when it fails because of a rate limit.
+# Usage: ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC]
+#                [--no-proactive] -- <command...>
+cmd_run() {
+    local max_attempts="" limit_threshold="95" timeout_sec="" proactive=true no_stdin=false
+    local -a cmd=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --max-attempts|--limit-threshold|--timeout)
+                if [[ $# -lt 2 ]]; then
+                    echo "Error: $1 requires a value" >&2; exit 2
+                fi
+                case "$1" in
+                    --max-attempts)    max_attempts="$2" ;;
+                    --limit-threshold) limit_threshold="$2" ;;
+                    --timeout)         timeout_sec="$2" ;;
+                esac
+                shift 2 ;;
+            --no-proactive)    proactive=false; shift ;;
+            --no-stdin)        no_stdin=true; shift ;;
+            --)                shift; cmd=("$@"); break ;;
+            *)  echo "Error: unknown option '$1' (put the command after --)" >&2; exit 2 ;;
+        esac
+    done
+
+    if [[ ${#cmd[@]} -eq 0 ]]; then
+        echo "Usage: ccs run [--max-attempts N] [--limit-threshold N] [--timeout SEC] [--no-proactive] -- <command...>" >&2
+        exit 2
+    fi
+    if [[ ! -f "$SEQUENCE_FILE" ]]; then
+        echo "Error: No accounts are managed yet" >&2
+        exit 2
+    fi
+    if [[ -n "$timeout_sec" && ! "$timeout_sec" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: --timeout must be a positive integer (seconds)" >&2
+        exit 2
+    fi
+    if [[ -n "$max_attempts" && ! "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: --max-attempts must be a positive integer" >&2
+        exit 2
+    fi
+    if [[ ! "$limit_threshold" =~ ^[0-9]+$ ]]; then
+        echo "Error: --limit-threshold must be a non-negative integer" >&2
+        exit 2
+    fi
+    setup_directories
+
+    local total
+    total=$(jq '.sequence | length' "$SEQUENCE_FILE" 2>/dev/null || echo "0")
+    [[ -z "$max_attempts" ]] && max_attempts="$total"
+    [[ "$max_attempts" -lt 1 ]] && max_attempts=1
+
+    # Create buffers first so cleanup function can reference them unconditionally.
+    local out_buf err_buf
+    out_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-out.XXXXXX")
+    err_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-err.XXXXXX")
+
+    # Spool non-tty stdin so every attempt replays byte-identical input. A live
+    # pipe would be drained by attempt 1; a concurrent tee could truncate on
+    # SIGPIPE if attempt 1 exits early. Read it fully up front instead.
+    local stdin_spool="" child_pid="" watchdog_pid="" timeout_flag=""
+    if [[ -n "$timeout_sec" ]]; then
+        timeout_flag=$(mktemp "${TMPDIR:-/tmp}/ccs-run-timeout.XXXXXX")
+    fi
+
+    # Unified cleanup: kill any live watchdog/child (and its process group)
+    # and remove all temp files.
+    _ccs_run_cleanup() {
+        if [[ -n "$watchdog_pid" ]]; then kill "$watchdog_pid" 2>/dev/null || true; fi
+        # kill -TERM -PID sends SIGTERM to the entire process group (PID == PGID
+        # because set -m made the child a group leader before launch).
+        if [[ -n "$child_pid" ]]; then kill -TERM -"$child_pid" 2>/dev/null || true; fi
+        rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"} ${timeout_flag:+"$timeout_flag"}
+    }
+    trap '_ccs_run_cleanup; trap - INT TERM; exit 130' INT
+    trap '_ccs_run_cleanup; trap - INT TERM; exit 143' TERM
+
+    # Decide how the child gets stdin. We only spool (to replay byte-identical
+    # input across retries) when there is a real, finite stdin stream: not a tty
+    # (a tty child under `set -m` would get SIGTTIN and hang), and not --no-stdin.
+    # Otherwise the child reads from /dev/null. Draining an inherited/held-open
+    # pipe that the command never reads would block here forever, so headless
+    # callers passing the prompt as an argument should use --no-stdin.
+    local stdin_mode="devnull"
+    if [[ "$no_stdin" != true && ! -t 0 ]]; then
+        stdin_mode="spool"
+    fi
+
+    if [[ "$stdin_mode" == "spool" ]]; then
+        stdin_spool=$(mktemp "${TMPDIR:-/tmp}/ccs-run-stdin.XXXXXX") || {
+            echo "ccs-run: failed to create stdin spool file" >&2
+            _ccs_run_cleanup; trap - INT TERM; return 1
+        }
+        chmod 600 "$stdin_spool"
+        if [[ -n "$timeout_sec" ]]; then
+            # Bound the spool read so a held-open pipe can't deadlock us.
+            cat > "$stdin_spool" &
+            local spool_pid=$!
+            ( sleep "$timeout_sec"; kill "$spool_pid" 2>/dev/null ) &
+            local spool_wd=$!
+            if ! wait "$spool_pid"; then
+                kill "$spool_wd" 2>/dev/null || true; wait "$spool_wd" 2>/dev/null || true
+                echo "ccs-run: timed out reading stdin" >&2
+                _ccs_run_cleanup; trap - INT TERM; return 124
+            fi
+            kill "$spool_wd" 2>/dev/null || true; wait "$spool_wd" 2>/dev/null || true
+        else
+            cat > "$stdin_spool"
+        fi
+    fi
+
+    local attempt=0
+    while [[ $attempt -lt $max_attempts ]]; do
+        attempt=$((attempt + 1))
+
+        # PIN 3 + PIN 4: re-read the expected-active account (endpoint-aware) before
+        # EVERY spawn. A stale value would make the CAS fail forever after the first
+        # rotation and spin without progress.
+        local started_account
+        started_account=$(effective_active_account_num)
+
+        if [[ $attempt -eq 1 && "$proactive" == true ]]; then
+            _run_proactive_precheck "$started_account"
+            started_account=$(effective_active_account_num)
+        fi
+
+        : > "$out_buf"; : > "$err_buf"
+        # Reset the timeout flag for this attempt (truncate so prior content gone).
+        [[ -n "$timeout_flag" ]] && : > "$timeout_flag"
+        local rc=0 timed_out=0
+        # set -m makes the background job its own process-group leader (PGID==PID),
+        # so kill -TERM -"$child_pid" can signal the entire tree. set +m restores
+        # the original job-control mode immediately after fork. In non-interactive
+        # shells set -m produces no chatter.
+        set -m
+        (
+            # Bound Claude Code's own internal retry backoff so a dead account
+            # surfaces to us quickly. CLAUDE_CODE_MAX_RETRIES is honored;
+            # CLAUDE_CODE_RETRY_WATCHDOG is best-effort and may be a no-op on some
+            # versions — `--timeout` is the authoritative bound. Caller overrides
+            # are respected.
+            export CLAUDE_CODE_MAX_RETRIES="${CLAUDE_CODE_MAX_RETRIES:-3}"
+            export CLAUDE_CODE_RETRY_WATCHDOG="${CLAUDE_CODE_RETRY_WATCHDOG:-0}"
+            if [[ -n "$stdin_spool" ]]; then
+                exec "${cmd[@]}" <"$stdin_spool"
+            else
+                exec "${cmd[@]}" </dev/null
+            fi
+        ) >"$out_buf" 2>"$err_buf" &
+        child_pid=$!
+        set +m
+
+        if [[ -n "$timeout_sec" ]]; then
+            # Watchdog: sleep then signal the entire process group (child_pid ==
+            # PGID because set -m was active at launch). Touch the single shared
+            # flag BEFORE kill so the parent detects timeout even if it wins the
+            # kill-0 race. The flag was truncated at the top of this attempt.
+            ( sleep "$timeout_sec"
+              echo 1 > "$timeout_flag" 2>/dev/null
+              kill -TERM -"$child_pid" 2>/dev/null
+              # Escalate: a child that traps/ignores SIGTERM would otherwise keep
+              # the parent blocked in `wait`, so `--timeout` would not bound it.
+              sleep 2
+              kill -KILL -"$child_pid" 2>/dev/null ) &
+            watchdog_pid=$!
+        fi
+        wait "$child_pid" || rc=$?
+        child_pid=""
+        if [[ -n "$watchdog_pid" ]]; then
+            if kill -0 "$watchdog_pid" 2>/dev/null; then
+                kill "$watchdog_pid" 2>/dev/null    # child finished first
+            fi
+            wait "$watchdog_pid" 2>/dev/null || true
+            # Timeout occurred iff the watchdog wrote to the flag (before kill).
+            if [[ -n "$timeout_flag" && -s "$timeout_flag" ]]; then
+                timed_out=1
+            fi
+            watchdog_pid=""
+        fi
+        cat "$err_buf" >&2
+
+        if [[ $rc -eq 0 ]]; then
+            cat "$out_buf"; _ccs_run_cleanup; trap - INT TERM; return 0
+        fi
+
+        if [[ $timed_out -eq 1 ]]; then
+            # A child killed mid-backoff is a paradigm rate-limit case: consult
+            # the buffered output before giving up.
+            if ! _run_detect_rate_limit "$out_buf" "$err_buf" "$started_account" "$limit_threshold"; then
+                echo "ccs-run: timeout attempts=$attempt" >&2
+                _ccs_run_cleanup; trap - INT TERM; return 124
+            fi
+            # else: fall through to rotation logic below (treat as rate-limited)
+        elif ! _run_detect_rate_limit "$out_buf" "$err_buf" "$started_account" "$limit_threshold"; then
+            cat "$out_buf"; _ccs_run_cleanup; trap - INT TERM; return "$rc"
+        fi
+
+        # PIN 2: capture the helper's rc set-e-safely.
+        local hrc=0
+        _rotate_to_healthy_next_account "$started_account" "$limit_threshold" >/dev/null 2>&1 || hrc=$?
+        case "$hrc" in
+            0|3)
+                # switched-healthy, or someone-else-rotated: retry either way.
+                # Jittered backoff before the next attempt to avoid retry storms
+                # when many `ccs run` share one global account.
+                if [[ $attempt -lt $max_attempts ]]; then sleep "0.$(( RANDOM % 5 ))" 2>/dev/null || true; fi
+                ;;
+            2)  echo "ccs-run: switch-error attempts=$attempt" >&2
+                _ccs_run_cleanup; trap - INT TERM; return 2 ;;
+            *)  echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
+                _ccs_run_cleanup; trap - INT TERM; return 3 ;;
+        esac
+    done
+
+    # Loop exited by hitting --max-attempts after rotating to a (healthy) account
+    # we never got to retry — distinct from all-accounts-exhausted (return 3), so
+    # an orchestrator doesn't park work when a usable account remains.
+    echo "ccs-run: max-attempts accounts=$total attempts=$attempt" >&2
+    _ccs_run_cleanup; trap - INT TERM; return 4
+}
+
 # --- Endpoint health probe ------------------------------------------------
 # Endpoints have no usage API; fallback is reactive. A request is "unhealthy"
 # (trigger fallback) on auth failure, rate/credit limit, server error, or
@@ -2362,6 +2668,81 @@ fetch_usage_data() {
 
     echo "$cache_content" > "$cache_file"
     return 0
+}
+
+# The configured rate-limit threshold, or 80.
+_rate_threshold() {
+    local t=""
+    if [[ -f "$SEQUENCE_FILE" ]]; then
+        t=$(jq -r '.rateLimit.threshold // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    fi
+    echo "${t:-80}"
+}
+
+# Rotate the shared active account to the next healthy one in the sequence.
+# Silent, no restart, no hook messaging — those stay with the caller.
+# Arg 1: expected_active — the account number the caller believes is live; the
+#        first hop is a compare-and-swap against it (see perform_switch).
+#        Pass empty to skip the CAS and rotate unconditionally (cmd_rate_check).
+# Arg 2: threshold — candidate over-threshold check; empty falls back to _rate_threshold().
+# Returns: 0 switched to a healthy account; 1 all others exhausted;
+#          2 switch error; 3 lost race (someone else already rotated).
+_rotate_to_healthy_next_account() {
+    local expected_active="$1"
+    local threshold="${2:-}"
+    local total_accounts
+    total_accounts=$(jq '.sequence | length' "$SEQUENCE_FILE" 2>/dev/null || echo "0")
+    [[ "$total_accounts" -lt 2 ]] && return 1
+
+    local cache_file
+    [[ -z "$threshold" ]] && threshold="$(_rate_threshold)"
+    cache_file=$(usage_cache_file)
+
+    local attempts=0 max_attempts=$((total_accounts - 1))
+    local first_hop="$expected_active"
+    while [[ $attempts -lt $max_attempts ]]; do
+        local active_account next_account
+        active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+        next_account=$(jq -r --argjson active "$active_account" '
+            .sequence as $seq |
+            ($seq | index($active) // 0) as $idx |
+            $seq[($idx + 1) % ($seq | length)]
+        ' "$SEQUENCE_FILE")
+
+        # Only the first hop carries the CAS; subsequent hops within this call
+        # already own the account, so pass no expectation.
+        # Use ||rc=$? (not $()) so set -e doesn't abort on a non-zero exit.
+        local rc=0
+        (CCS_SILENT=1 perform_switch "$next_account" "$first_hop") >/dev/null 2>&1 || rc=$?
+        first_hop=""
+        case "$rc" in
+            0) : ;;
+            3) return 3 ;;
+            *) return 2 ;;
+        esac
+
+        local healthy=false
+        if is_endpoint_account "$next_account"; then
+            if probe_endpoint_health "$next_account"; then healthy=true; fi
+        else
+            rm -f "$cache_file"
+            if fetch_usage_data; then
+                local new_usage new_usage_int
+                new_usage=$(_cache_max_utilization "$cache_file")
+                if new_usage_int=$(usage_to_int "$new_usage"); then
+                    [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
+                else
+                    healthy=true
+                fi
+            else
+                healthy=true
+            fi
+        fi
+
+        [[ "$healthy" == true ]] && return 0
+        attempts=$((attempts + 1))
+    done
+    return 1
 }
 
 # Rate limit check command
@@ -2540,52 +2921,16 @@ cmd_rate_check() {
         local resume_sid
         resume_sid=$(capture_resume_session_id)
 
-        # Try switching to next accounts (up to N-1 attempts)
-        local attempts=0
-        local max_attempts=$((total_accounts - 1))
+        local hrc=0
+        # Pass empty expected_active so perform_switch skips the CAS: cmd_rate_check
+        # has no compare-and-swap semantics (that is reserved for `ccs run`).
+        _rotate_to_healthy_next_account "" "$threshold" || hrc=$?
 
-        while [[ $attempts -lt $max_attempts ]]; do
-            local active_account next_account next_email
-            active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-            next_account=$(jq -r --argjson active "$active_account" '
-                .sequence as $seq |
-                ($seq | index($active) // 0) as $idx |
-                $seq[($idx + 1) % ($seq | length)]
-            ' "$SEQUENCE_FILE")
-            next_email=$(account_display_id "$next_account")
-
-            # Perform switch in subshell to catch exit 1 from perform_switch
-            if ! (CCS_SILENT=1 perform_switch "$next_account"); then
-                # Switch failed — fail open in hook mode
-                if [[ "$hook_mode" == true ]]; then
-                    exit 0
-                fi
-                echo "Error: Failed to switch to Account-$next_account ($next_email)" >&2
-                exit 2
-            fi
-
-            # Verify the candidate by type: probe endpoints, usage-check oauth.
-            local healthy=false
-            if is_endpoint_account "$next_account"; then
-                if probe_endpoint_health "$next_account"; then healthy=true; fi
-            else
-                rm -f "$cache_file"
-                if fetch_usage_data; then
-                    local new_usage new_usage_int
-                    new_usage=$(jq -r '.five_hour.utilization // 0' "$cache_file" 2>/dev/null || echo "0")
-                    if new_usage_int=$(usage_to_int "$new_usage"); then
-                        [[ "$new_usage_int" -lt "$threshold" ]] && healthy=true
-                    else
-                        # Unreadable usage — same as a failed fetch: assume OK.
-                        healthy=true
-                    fi
-                else
-                    # Can't verify usage; assume OK (matches prior behavior).
-                    healthy=true
-                fi
-            fi
-
-            if [[ "$healthy" == true ]]; then
+        case "$hrc" in
+            0)
+                local next_account next_email
+                next_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+                next_email=$(account_display_id "$next_account")
                 if [[ "$hook_mode" == true ]]; then
                     local next_step="Please restart Claude Code."
                     if [[ -n "$resume_sid" ]]; then
@@ -2597,18 +2942,22 @@ cmd_rate_check() {
                 echo "Switched to Account-$next_account ($next_email)"
                 handle_restart_after_switch
                 exit 1
-            fi
-
-            attempts=$((attempts + 1))
-        done
-
-        # All accounts are limited
-        if [[ "$hook_mode" == true ]]; then
-            _rate_hook_deny "Rate limit exceeded on all accounts (${usage_int}%). Please wait for limits to reset."
-            exit 0
-        fi
-        echo "All accounts are above the threshold" >&2
-        exit 3
+                ;;
+            2)
+                if [[ "$hook_mode" == true ]]; then exit 0; fi
+                echo "Error: Failed to switch accounts" >&2
+                exit 2
+                ;;
+            *)
+                # 1 = all exhausted (3/lost-race can't occur: cmd_rate_check passes no CAS expectation)
+                if [[ "$hook_mode" == true ]]; then
+                    _rate_hook_deny "Rate limit exceeded on all accounts (${usage_int}%). Please wait for limits to reset."
+                    exit 0
+                fi
+                echo "All accounts are above the threshold" >&2
+                exit 3
+                ;;
+        esac
     fi
 
     # No auto-switch, just report
@@ -2950,6 +3299,7 @@ show_usage() {
     echo "Parallel / isolated accounts (CLAUDE_CONFIG_DIR):"
     echo "  exec <num|email|label> -- <cmd>  Run a command as an account, isolated"
     echo "  config-dir <num|email|label> [path]  Materialize an account's config dir, print it"
+    echo "  run [opts] -- <command...>       Run a command, auto-switch + retry on rate limit"
     echo ""
     echo "Rate Limiting:"
     echo "  rate-check [--threshold N]       Check if usage exceeds threshold"
@@ -2971,6 +3321,11 @@ show_usage() {
     echo "  --fork-session                   With --resume: fork into a new session (default)"
     echo "  --no-fork-session                With --resume: continue the same session"
     echo "  --allow-root                     Allow running as root (or set CCSWITCH_ALLOW_ROOT=1)"
+    echo "  --max-attempts N                 ccs run: cap attempts (default: number of accounts)"
+    echo "  --limit-threshold N              ccs run: usage% for the secondary limit check (default 95)"
+    echo "  --timeout SEC                    ccs run: per-attempt deadline (kills the child)"
+    echo "  --no-proactive                   ccs run: skip the pre-run usage check"
+    echo "  --no-stdin                       ccs run: don't read stdin; feed the child /dev/null"
     echo "  version                          Show version number"
     echo "  help                             Show this help message"
     echo ""
@@ -2990,6 +3345,7 @@ show_usage() {
     echo "  ccs dir ~/work 1                           # Map ~/work to account 1"
     echo "  ccs auto                                   # Switch based on current directory"
     echo "  ccs exec 2 -- claude -p \"hi\"               # Run claude as account 2, isolated"
+    echo "  ccs run -- claude -p \"summarize\"           # Auto-switch + retry on rate limit"
     echo "  ccs rm user@example.com                    # Remove account"
 }
 
@@ -3033,6 +3389,13 @@ main() {
                 # `exec` runs an arbitrary command — stop interpreting global
                 # flags so anything after it (e.g. --no-restart for claude) is
                 # passed through verbatim. Put ccs options before `exec`.
+                args+=("$@")
+                break
+                ;;
+            run)
+                # Like `exec`: stop interpreting global flags so the wrapped
+                # command (e.g. claude --resume/--no-restart) passes through
+                # verbatim. Put any ccs options before `run`.
                 args+=("$@")
                 break
                 ;;
@@ -3097,6 +3460,10 @@ main() {
         config-dir)
             shift
             cmd_config_dir "$@"
+            ;;
+        run)
+            shift
+            cmd_run "$@"
             ;;
         resume-mode)
             shift

@@ -236,6 +236,46 @@ It renders e.g. `ccs you@example.com · 5h 42%` and appends `(!)` once you cross
 
 > **Note (multi-account at the same time):** `ccswitch` rewrites a single machine-global credential store, so all Claude Code processes on the machine share one account at a time. Auto-switch is built for the *sequential* case — "when this account is exhausted, rotate to the next." Running different accounts in parallel requires per-process isolation via `CLAUDE_CONFIG_DIR` — see below.
 
+### Reactive auto-switch (`ccs run`)
+
+For headless orchestrators (e.g. Paperclip/Multica) running `claude -p`, the PreToolUse hook described above cannot see a 429 that arrives mid-turn. `ccs run` fills that gap: it runs a command on the active account and, when the command fails because the account is rate-limited, switches to the next healthy account and retries.
+
+```bash
+ccs run -- claude -p "summarize this repo"
+ccs run --max-attempts 3 --timeout 120 -- claude -p "..."
+```
+
+**Detection** is format-agnostic: `ccs run` greps the failed run's stderr and the final lines of its stdout for documented rate-limit markers (a `(429)` API error, `rate-limit`/`rate_limit`, `overloaded`, `usage limit`). When those are absent but the command still failed, it falls back to a usage-API check (max of the 5-hour and 7-day windows) to decide whether the account is actually exhausted.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--max-attempts N` | number of accounts | Maximum total attempts across all accounts |
+| `--limit-threshold N` | 95 | Usage % for the secondary/reactive limit confirmation and post-switch health check |
+| `--timeout SEC` | none | Per-attempt time limit; kills the child's process group. Also bounds the stdin read |
+| `--no-proactive` | — | Skip the pre-run usage check |
+| `--no-stdin` | — | Don't read stdin; feed the child `/dev/null` (see stdin note below) |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| command's own code | Non-rate-limit failure (no retry) |
+| 124 | Attempt killed by `--timeout` (or a stdin read that timed out) |
+| 3 | All accounts exhausted; a machine-readable `ccs-run: exhausted accounts=N attempts=M` line is printed to stderr |
+| 4 | `--max-attempts` reached after rotating to a healthy account that wasn't retried; prints `ccs-run: max-attempts accounts=N attempts=M`. Distinct from 3 so an orchestrator doesn't park work while a usable account remains |
+| 2 | Internal switch error |
+
+**stdin** is spooled to a temp file and replayed on each attempt (so a retry sees byte-identical input). Only the successful attempt's stdout is emitted.
+
+> **IMPORTANT — stdin can block:** because the spool is read to EOF up front, a command that never reads stdin but inherits a long-lived/open pipe (common when an orchestrator spawns children with inherited stdin) will make `ccs run` block before the first attempt. If you pass the prompt as an argument (`claude -p "..."`), use **`--no-stdin`** (or redirect `</dev/null`). `--timeout` also bounds the stdin read.
+
+> **IMPORTANT — Idempotency:** a rate-limited attempt may have already run tool calls with side effects before the limit was hit. The default retry re-runs the command from the beginning, so side effects can duplicate. Design your commands to be idempotent, or use `--max-attempts 1` (which still rotates once to a healthy account for your *next* invocation, but does not retry in-place).
+
+> **IMPORTANT — Buffered stdout:** only the successful attempt's stdout is emitted. This means `--output-format stream-json` events are not streamed live, which may trip an orchestrator's inactivity timeout.
+
 ### Parallel / isolated accounts (`CLAUDE_CONFIG_DIR`)
 
 To run multiple Claude Code processes as **different** accounts at the same time (e.g. an orchestrator like Paperclip/Multica fanning out agents), give each process its own config directory instead of switching the global store:

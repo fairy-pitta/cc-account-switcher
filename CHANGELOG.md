@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ccs run -- <command...>` runs a command (typically `claude -p`) on the active account and, when it fails because the account is rate-limited, switches to the next healthy account and retries. Detection is format-agnostic (greps the failed run's output for `429`/`rate_limit`/`overloaded`/`usage limit`, with a usage-API check as fallback), so it complements the proactive PreToolUse hook — which structurally cannot see a mid-turn 429 — for headless orchestrators. stdin is replayed per attempt, only the successful attempt's stdout is emitted, internal Claude retries are bounded, `--timeout` reaps the child's process group, and exhaustion prints a machine-readable `ccs-run: exhausted …` line (exit 3). Note: retries can duplicate side effects of a partially-run command
+
 ## [0.6.0] - 2026-08-19
 
 ### Added

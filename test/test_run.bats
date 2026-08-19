@@ -1,0 +1,653 @@
+#!/usr/bin/env bats
+#
+# ccs run — reactive rate-limit auto-switch, and the perform_switch CAS /
+# rotate helper it is built on.
+
+load test_helper
+
+setup() { setup_test_env; }
+teardown() { teardown_test_env; }
+
+# --- perform_switch compare-and-swap (expected_active) ------------------------
+
+@test "perform_switch with matching expected_active performs the switch" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    # add_account_to_sequence creates backup files for both accounts.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+
+    # Switch 1 -> 2, asserting we are still on 1.
+    run run_ccswitch_perform_switch 2 1
+    [ "$status" -eq 0 ]
+    local active
+    active=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    [ "$active" -eq 2 ]
+}
+
+@test "perform_switch with mismatching expected_active returns 3 and does not switch" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    # add_account_to_sequence creates backup files for both accounts.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+
+    # We claim to expect account 9 (not the live 1) -> lost race -> return 3.
+    run run_ccswitch_perform_switch 2 9
+    [ "$status" -eq 3 ]
+    local active
+    active=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    [ "$active" -eq 1 ]
+    # Lock must not be left stranded after a CAS miss.
+    [ ! -d "$BACKUP_DIR/.switch.lock" ]
+}
+
+# --- _rotate_to_healthy_next_account ------------------------------------------
+
+run_ccswitch_rotate() {
+    HOME="$TEST_HOME" PATH="$MOCK_BIN:$ORIGINAL_PATH" /bin/bash -c '
+        CCS_TEST_FUNC=1
+        source "'"$CCSWITCH_SCRIPT"'"
+        _rotate_to_healthy_next_account "$@"
+    ' _ "$@"
+}
+
+@test "rotate helper returns 0 and lands on a healthy next account" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+
+    run run_ccswitch_rotate 1
+    [ "$status" -eq 0 ]
+    [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 2 ]
+}
+
+@test "rotate helper returns 3 when the active account already moved (lost race)" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+
+    run run_ccswitch_rotate 9
+    [ "$status" -eq 3 ]
+    [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 1 ]
+}
+
+@test "rotate helper returns 1 when every other account is over threshold" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":99.0,"limit":100,"used":99}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    local u; u=$(jq '.rateLimit = {enabled:true, threshold:80}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+
+    run run_ccswitch_rotate 1
+    [ "$status" -eq 1 ]
+}
+
+@test "rotate helper honors threshold passed as arg 2 over config" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    # Candidate reports 90% usage.
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":90.0,"limit":100,"used":90}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    # Config threshold 95 (90 < 95 => would be healthy), but arg 2 = 80 (90 >= 80 => exhausted).
+    # Pass empty expected_active (no CAS) so perform_switch rotates unconditionally.
+    local u; u=$(jq '.rateLimit = {enabled:true, threshold:95}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+    run run_ccswitch_rotate "" 80
+    [ "$status" -eq 1 ]
+}
+
+@test "rotate helper returns 2 when perform_switch fails (missing target credentials)" {
+    # Only setup_fake_account for the ACTIVE account so .claude.json reflects it.
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    # Remove account 2's backup credentials from the mock keychain so perform_switch
+    # hits the "Missing backup data" branch and exits 1, causing the helper to return 2.
+    local keychain_dir="$TEST_HOME/.mock-keychain"
+    rm -f "$keychain_dir/Claude_Code-Account-2-b@example.com"
+
+    run run_ccswitch_rotate ""
+    [ "$status" -eq 2 ]
+}
+
+# --- cmd_run: basic passthrough ----------------------------------------------
+
+# A mock "claude" whose behavior is driven by env the test sets:
+#   CLAUDE_MOCK_EXIT   — exit code (default 0)
+#   CLAUDE_MOCK_STDOUT — printed to stdout
+#   CLAUDE_MOCK_STDERR — printed to stderr
+install_mock_claude() {
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+[[ -n "${CLAUDE_MOCK_STDOUT:-}" ]] && printf '%s\n' "$CLAUDE_MOCK_STDOUT"
+[[ -n "${CLAUDE_MOCK_STDERR:-}" ]] && printf '%s\n' "$CLAUDE_MOCK_STDERR" >&2
+exit "${CLAUDE_MOCK_EXIT:-0}"
+M
+    chmod +x "$MOCK_BIN/claude"
+}
+
+@test "run executes the command and passes through its stdout on success" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    install_mock_claude
+
+    CLAUDE_MOCK_STDOUT="hello-from-claude" run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"hello-from-claude"* ]]
+}
+
+@test "run errors when no command is given" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Usage: ccs run"* ]]
+}
+
+@test "run passes through the command's exit code and output on failure" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    install_mock_claude
+
+    CLAUDE_MOCK_EXIT=7 CLAUDE_MOCK_STDOUT="partial-output" run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 7 ]
+    [[ "$output" == *"partial-output"* ]]
+}
+
+# --- detection ---------------------------------------------------------------
+
+run_ccswitch_detect() {
+    # args: <stdout-content> <stderr-content>; returns 0 if rate-limited
+    local so="$1" se="$2"
+    HOME="$TEST_HOME" PATH="$MOCK_BIN:$ORIGINAL_PATH" /bin/bash -c '
+        CCS_TEST_FUNC=1
+        source "'"$CCSWITCH_SCRIPT"'"
+        obuf=$(mktemp); ebuf=$(mktemp)
+        printf "%s\n" "$1" > "$obuf"; printf "%s\n" "$2" > "$ebuf"
+        _run_detect_rate_limit "$obuf" "$ebuf" "" "95"
+        rc=$?; rm -f "$obuf" "$ebuf"; exit $rc
+    ' _ "$so" "$se"
+}
+
+@test "detect: 429 API error on stderr is a rate limit" {
+    run run_ccswitch_detect "" "API Error: Request rejected (429) rate_limit"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect: overloaded on stderr is a rate limit" {
+    run run_ccswitch_detect "" "Error: overloaded"
+    [ "$status" -eq 0 ]
+}
+
+@test "detect: an ordinary error is not a rate limit" {
+    run run_ccswitch_detect "" "Error: ENOENT no such file"
+    [ "$status" -ne 0 ]
+}
+
+@test "detect: the word 429 buried early in stdout body does not fire" {
+    run run_ccswitch_detect "http 429 appears here in a log excerpt
+clean line 2
+clean line 3
+clean line 4
+final result: ok" ""
+    [ "$status" -ne 0 ]
+}
+
+@test "detect: rate-limit marker in last stdout line fires" {
+    run run_ccswitch_detect "normal line
+API Error: overloaded" ""
+    [ "$status" -eq 0 ]
+}
+
+# --- retry + rotation --------------------------------------------------------
+
+install_mock_claude_switch_aware() {
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+if [[ "\$active" == "1" ]]; then
+    echo "SHOULD-NOT-APPEAR"
+    echo "API Error: Request rejected (429) rate_limit" >&2
+    exit 1
+fi
+echo "ok-on-account-\$active"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+}
+
+@test "run rotates on a rate limit and succeeds on the next account" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    install_mock_claude_switch_aware
+
+    run run_ccswitch run --no-proactive -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok-on-account-2"* ]]
+    [[ "$output" != *"SHOULD-NOT-APPEAR"* ]]
+    [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 2 ]
+}
+
+@test "run passes a non-rate-limit failure straight through without switching" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    install_mock_claude
+    CLAUDE_MOCK_EXIT=7 CLAUDE_MOCK_STDERR="Error: bad input" run run_ccswitch run --no-proactive -- claude -p "hi"
+    [ "$status" -eq 7 ]
+    [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 1 ]
+}
+
+@test "run exits 3 with a machine-readable line when all accounts are exhausted" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":99.0,"limit":100,"used":99}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "FAILED-STDOUT-SHOULD-NOT-APPEAR"
+echo "API Error: Request rejected (429)" >&2
+exit 1
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive -- claude -p "hi"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"ccs-run: exhausted"* ]]
+    [[ "$output" != *"FAILED-STDOUT-SHOULD-NOT-APPEAR"* ]]
+}
+
+# --- stdin replay ------------------------------------------------------------
+
+@test "run replays stdin byte-identically on the retry" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    # Fail (429) on account 1, but on account 2 echo back the stdin it received.
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+input=\$(cat)
+if [[ "\$active" == "1" ]]; then echo "A1GOT:\$input" >&2; echo "429 rate_limit" >&2; exit 1; fi
+echo "GOT:\$input"
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run bash -c 'printf "%s" "the-secret-prompt" | HOME="'"$TEST_HOME"'" PATH="'"$MOCK_BIN:$ORIGINAL_PATH"'" /bin/bash "'"$CCSWITCH_SCRIPT"'" run --no-proactive -- claude -p'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"A1GOT:the-secret-prompt"* ]]
+    [[ "$output" == *"GOT:the-secret-prompt"* ]]
+}
+
+# --- retry env + proactive ---------------------------------------------------
+
+@test "run bounds the child's internal retries via env by default" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "MAX=${CLAUDE_CODE_MAX_RETRIES:-unset} WD=${CLAUDE_CODE_RETRY_WATCHDOG:-unset}"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"MAX=3 WD=0"* ]]
+}
+
+@test "run respects a caller-provided CLAUDE_CODE_MAX_RETRIES" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "MAX=${CLAUDE_CODE_MAX_RETRIES:-unset}"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    CLAUDE_CODE_MAX_RETRIES=9 run run_ccswitch run --no-proactive -- claude -p "hi"
+    [[ "$output" == *"MAX=9"* ]]
+}
+
+@test "run proactively rotates before attempt 1 when the active account is over threshold" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    create_fake_usage_cache "99.0" "a@example.com"
+    local u; u=$(jq '.rateLimit={enabled:true,threshold:80}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+echo "ran-on-\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")"
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ran-on-2"* ]]
+}
+
+@test "run respects a caller-provided CLAUDE_CODE_RETRY_WATCHDOG" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "WD=${CLAUDE_CODE_RETRY_WATCHDOG:-unset}"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+    CLAUDE_CODE_RETRY_WATCHDOG=1 run run_ccswitch run --no-proactive -- claude -p "hi"
+    [[ "$output" == *"WD=1"* ]]
+}
+
+@test "run does not proactively rotate when active account is under threshold" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    create_fake_usage_cache "10.0" "a@example.com"
+    local u; u=$(jq '.rateLimit={enabled:true,threshold:80}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+echo "ran-on-\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")"
+M
+    chmod +x "$MOCK_BIN/claude"
+    run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ran-on-1"* ]]
+}
+
+@test "run does not proactively rotate on a stale cache" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    create_fake_usage_cache "99.0" "a@example.com"
+    # Force staleness: set cached_at to epoch 1970 so age >> DEFAULT_CACHE_TTL.
+    local c; c=$(jq '.cached_at = 1' "$CCS_USAGE_CACHE"); echo "$c" > "$CCS_USAGE_CACHE"
+    local u; u=$(jq '.rateLimit={enabled:true,threshold:80}' "$SEQUENCE_FILE"); echo "$u" > "$SEQUENCE_FILE"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+echo "ran-on-\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")"
+M
+    chmod +x "$MOCK_BIN/claude"
+    run run_ccswitch run -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ran-on-1"* ]]
+}
+
+# --- timeout + signals -------------------------------------------------------
+
+@test "run kills a child that exceeds --timeout and passes 124 through" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "TIMED-OUT-STDOUT-SHOULD-NOT-APPEAR"
+exec sleep 30
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    local start=$SECONDS
+    run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
+    local elapsed=$(( SECONDS - start ))
+    [ "$status" -eq 124 ]
+    [ "$elapsed" -lt 10 ]
+    [[ "$output" != *"TIMED-OUT-STDOUT-SHOULD-NOT-APPEAR"* ]]
+}
+
+@test "run's --timeout reaps the child's subprocess tree" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    local pidfile="$TEST_HOME/grandchild.pid"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+sleep 30 &
+echo \$! > "$pidfile"
+wait
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
+    [ "$status" -eq 124 ]
+    local gpid; gpid=$(cat "$pidfile")
+    run kill -0 "$gpid"
+    [ "$status" -ne 0 ]
+}
+
+@test "run rejects a non-numeric --timeout" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --timeout abc -- claude -p "hi"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"positive integer"* ]]
+}
+
+@test "run treats a timed-out child that was mid-rate-limit as a rate limit" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+if [[ "\$active" == "1" ]]; then echo "Retrying in 2s attempt 1/3" >&2; sleep 30; fi
+echo "ok-on-\$active"
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok-on-2"* ]]
+}
+
+@test "run passes ccs-global-looking flags through to the wrapped command" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    # Mock echoes back all args it received.
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "ARGS:$*"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive -- claude -p "hi" --resume SID --no-restart
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARGS:-p hi --resume SID --no-restart"* ]]
+}
+
+# --- stdin modes + validation + max-attempts contract ------------------------
+
+@test "run --no-stdin feeds the child /dev/null and does not read stdin" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+got=$(cat); echo "GOT:[$got]"; exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+    # Pipe data in; --no-stdin must ignore it and the child must see empty stdin.
+    run bash -c 'printf "ignored-input" | HOME="'"$TEST_HOME"'" PATH="'"$MOCK_BIN:$ORIGINAL_PATH"'" /bin/bash "'"$CCSWITCH_SCRIPT"'" run --no-proactive --no-stdin -- claude -p "hi"'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GOT:[]"* ]]
+}
+
+@test "run rejects a non-numeric --max-attempts" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --max-attempts abc -- claude -p hi
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"positive integer"* ]]
+}
+
+@test "run rejects a non-numeric --limit-threshold" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --limit-threshold xx -- claude -p hi
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"non-negative integer"* ]]
+}
+
+@test "run reports max-attempts (exit 4) distinctly from all-exhausted, leaving a healthy account active" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    # Candidate account 2 is healthy.
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    # Account 1 rate-limits; --max-attempts 1 means we rotate once but don't retry.
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+if [[ "\$active" == "1" ]]; then echo "API Error: Request rejected (429)" >&2; exit 1; fi
+echo "ok-on-\$active"
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive --max-attempts 1 -- claude -p "hi"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"ccs-run: max-attempts"* ]]
+    [[ "$output" != *"ccs-run: exhausted"* ]]
+    # It rotated to the healthy account 2 (available for the caller's next run).
+    [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 2 ]
+}
+
+@test "run --timeout escalates to SIGKILL for a child that ignores SIGTERM" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    # A child that traps and ignores SIGTERM, then sleeps.
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+trap '' TERM
+sleep 30
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    local start=$SECONDS
+    run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
+    local elapsed=$(( SECONDS - start ))
+    [ "$status" -eq 124 ]
+    [ "$elapsed" -lt 10 ]
+}
+
+@test "run errors cleanly when --timeout is given without a value" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --timeout
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"requires a value"* ]]
+}
+
+# Detection secondary-fallback account-race guard (Codex/Fable TOCTOU).
+run_ccswitch_detect_acct() {
+    # args: <stderr-content> <account> <threshold>
+    local se="$1" acct="$2" thr="$3"
+    HOME="$TEST_HOME" PATH="$MOCK_BIN:$ORIGINAL_PATH" /bin/bash -c '
+        CCS_TEST_FUNC=1
+        source "'"$CCSWITCH_SCRIPT"'"
+        obuf=$(mktemp); ebuf=$(mktemp)
+        : > "$obuf"; printf "%s\n" "$1" > "$ebuf"
+        _run_detect_rate_limit "$obuf" "$ebuf" "$2" "$3"
+        rc=$?; rm -f "$obuf" "$ebuf"; exit $rc
+    ' _ "$se" "$acct" "$thr"
+}
+
+@test "detect: usage fallback is skipped when the active account drifted" {
+    setup_fake_account "user1@example.com" "uuid-1"
+    add_account_to_sequence "1" "user1@example.com" "uuid-1" "true"
+    create_fake_credentials "user1@example.com"
+    # A cache/API that would report over-threshold usage if consulted.
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":99.0,"limit":100,"used":99}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+
+    # Active account is 1; a non-limit failure that ran under account 99 (drift):
+    # no grep marker, account mismatch -> guard skips fallback -> NOT rate-limited.
+    run run_ccswitch_detect_acct "Error: ENOENT no such file" "99" "80"
+    [ "$status" -ne 0 ]
+
+    # Sanity: with the matching active account (1), the usage fallback DOES fire.
+    run run_ccswitch_detect_acct "Error: ENOENT no such file" "1" "80"
+    [ "$status" -eq 0 ]
+}
