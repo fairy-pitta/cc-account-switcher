@@ -221,3 +221,80 @@ clean line 4
 final result: ok" ""
     [ "$status" -ne 0 ]
 }
+
+@test "detect: rate-limit marker in last stdout line fires" {
+    run run_ccswitch_detect "normal line
+API Error: overloaded" ""
+    [ "$status" -eq 0 ]
+}
+
+# --- retry + rotation --------------------------------------------------------
+
+install_mock_claude_switch_aware() {
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+if [[ "\$active" == "1" ]]; then
+    echo "SHOULD-NOT-APPEAR"
+    echo "API Error: Request rejected (429) rate_limit" >&2
+    exit 1
+fi
+echo "ok-on-account-\$active"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+}
+
+@test "run rotates on a rate limit and succeeds on the next account" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":10.0,"limit":100,"used":10}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    install_mock_claude_switch_aware
+
+    run run_ccswitch run --no-proactive -- claude -p "hi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ok-on-account-2"* ]]
+    [[ "$output" != *"SHOULD-NOT-APPEAR"* ]]
+    [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 2 ]
+}
+
+@test "run passes a non-rate-limit failure straight through without switching" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    install_mock_claude
+    CLAUDE_MOCK_EXIT=7 CLAUDE_MOCK_STDERR="Error: bad input" run run_ccswitch run --no-proactive -- claude -p "hi"
+    [ "$status" -eq 7 ]
+    [ "$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")" -eq 1 ]
+}
+
+@test "run exits 3 with a machine-readable line when all accounts are exhausted" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    add_account_to_sequence "2" "b@example.com" "uuid-b" "false"
+    create_fake_credentials "a@example.com"
+    cat > "$MOCK_BIN/curl" << 'M'
+#!/bin/bash
+echo '{"five_hour":{"utilization":99.0,"limit":100,"used":99}}'
+echo "200"
+M
+    chmod +x "$MOCK_BIN/curl"
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "API Error: Request rejected (429)" >&2
+exit 1
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive -- claude -p "hi"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"ccs-run: exhausted"* ]]
+}

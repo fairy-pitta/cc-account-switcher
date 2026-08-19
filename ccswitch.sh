@@ -2211,7 +2211,7 @@ cmd_exec() {
 }
 
 # Rate-limit markers, anchored on Claude Code's documented shapes. Extend freely.
-readonly CCS_RATE_LIMIT_RE='API Error:.*\(429\)|Request rejected \(429\)|Retrying in .*attempt|rate.limit|overloaded|usage limit'
+readonly CCS_RATE_LIMIT_RE='API Error:.*\(429\)|Request rejected \(429\)|Retrying in .*attempt|rate[_ ]limit|overloaded|usage limit'
 
 # Decide whether a failed run failed because of a rate limit.
 # Args: <stdout-buffer> <stderr-buffer> <active-account-num> <limit-threshold>
@@ -2282,17 +2282,47 @@ cmd_run() {
     [[ -z "$max_attempts" ]] && max_attempts="$total"
     [[ "$max_attempts" -lt 1 ]] && max_attempts=1
 
-    # Buffers (cleaned up by the trap installed in a later task).
-    local out_buf
+    local out_buf err_buf
     out_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-out.XXXXXX")
+    err_buf=$(mktemp "${TMPDIR:-/tmp}/ccs-run-err.XXXXXX")
 
-    local rc=0
-    "${cmd[@]}" >"$out_buf" 2>&1 || rc=$?
-    if [[ $rc -eq 0 ]]; then
-        cat "$out_buf"; rm -f "$out_buf"; return 0
-    fi
-    cat "$out_buf"; rm -f "$out_buf"
-    return "$rc"
+    local attempt=0
+    while [[ $attempt -lt $max_attempts ]]; do
+        attempt=$((attempt + 1))
+
+        # PIN 3 + PIN 4: re-read the expected-active account (endpoint-aware) before
+        # EVERY spawn. A stale value would make the CAS fail forever after the first
+        # rotation and spin without progress.
+        local started_account
+        started_account=$(effective_active_account_num)
+
+        : > "$out_buf"; : > "$err_buf"
+        local rc=0
+        "${cmd[@]}" >"$out_buf" 2>"$err_buf" || rc=$?
+        cat "$err_buf" >&2
+
+        if [[ $rc -eq 0 ]]; then
+            cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return 0
+        fi
+
+        if ! _run_detect_rate_limit "$out_buf" "$err_buf" "$started_account" "$limit_threshold"; then
+            cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return "$rc"
+        fi
+
+        # PIN 2: capture the helper's rc set-e-safely.
+        local hrc=0
+        _rotate_to_healthy_next_account "$started_account" "$limit_threshold" >/dev/null 2>&1 || hrc=$?
+        case "$hrc" in
+            0|3) : ;;   # switched-healthy, or someone-else-rotated: retry either way
+            2)  echo "ccs-run: switch-error attempts=$attempt" >&2
+                cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return 2 ;;
+            *)  echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
+                cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return 3 ;;
+        esac
+    done
+
+    echo "ccs-run: exhausted accounts=$total attempts=$attempt" >&2
+    cat "$out_buf"; rm -f "$out_buf" "$err_buf"; return 3
 }
 
 # --- Endpoint health probe ------------------------------------------------
