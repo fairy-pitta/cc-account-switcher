@@ -12,6 +12,9 @@ class Ccswitch < Formula
 
   def install
     bin.install "ccswitch.sh" => "ccs"
+    # `ccs rate-setup` / `ccs statusline-setup` look for these next to the
+    # script and then in <prefix>/share/ccswitch.
+    pkgshare.install "hooks", "statusline"
   end
 
   test do

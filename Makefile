@@ -1,5 +1,8 @@
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
+# Helper scripts (rate-limit hook, statusline) that `ccs rate-setup` and
+# `ccs statusline-setup` wire into Claude Code. ccs looks for them here.
+SHAREDIR ?= $(PREFIX)/share/ccswitch
 BASH_COMPLETIONDIR ?= $(PREFIX)/share/bash-completion/completions
 ZSH_COMPLETIONDIR ?= $(PREFIX)/share/zsh/site-functions
 FISH_COMPLETIONDIR ?= $(PREFIX)/share/fish/vendor_completions.d
@@ -14,6 +17,10 @@ install: ## Install ccs to $(PREFIX)/bin
 	@echo "Installing ccs to $(BINDIR)..."
 	install -d $(BINDIR)
 	install -m 755 ccswitch.sh $(BINDIR)/ccs
+	@# Install the hook and statusline scripts
+	install -d $(SHAREDIR)/hooks $(SHAREDIR)/statusline
+	install -m 755 hooks/ccs-rate-hook.sh $(SHAREDIR)/hooks/
+	install -m 755 statusline/ccs-statusline.sh $(SHAREDIR)/statusline/
 	@# Install bash completions if available
 	@if ls completions/*.bash 1>/dev/null 2>&1; then \
 		install -d $(BASH_COMPLETIONDIR); \
@@ -35,6 +42,7 @@ uninstall: ## Remove installed files
 	@echo "Uninstalling ccs..."
 	rm -f $(BINDIR)/ccs
 	rm -f $(BINDIR)/ccswitch
+	rm -rf $(SHAREDIR)
 	rm -f $(BASH_COMPLETIONDIR)/ccswitch.bash
 	rm -f $(ZSH_COMPLETIONDIR)/_ccswitch
 	rm -f $(FISH_COMPLETIONDIR)/ccswitch.fish

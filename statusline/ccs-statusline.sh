@@ -27,12 +27,15 @@ fi
 SEQ="$HOME/.claude-switch-backup/sequence.json"
 
 # Resolve ccs: 1) CCS_PATH env (set by statusline-setup), 2) sibling of this
-# script's dir, 3) PATH, 4) common locations.
+# script's dir (source checkout, npm package), 3) the bin/ next to the
+# share/ccswitch/ we were installed into (`make install`, Homebrew), 4) PATH,
+# 5) common locations.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "")"
 CCS="${CCS_PATH:-}"
-[[ -z "$CCS" || ! -x "$CCS" ]] && CCS="${SCRIPT_DIR}/../ccswitch.sh"
+[[ -x "$CCS" ]] || CCS="${SCRIPT_DIR}/../ccswitch.sh"
+[[ -x "$CCS" ]] || CCS="${SCRIPT_DIR}/../../../bin/ccs"
 [[ -x "$CCS" ]] || CCS=$(command -v ccs 2>/dev/null || echo "")
-[[ -z "$CCS" || ! -x "$CCS" ]] && CCS="/usr/local/bin/ccs"
+[[ -x "$CCS" ]] || CCS="/usr/local/bin/ccs"
 
 # Kick a TTL-aware refresh in the background (no --auto-switch: refreshing the
 # cache is the statusline's job; switching is the hook's). Detached so the render
