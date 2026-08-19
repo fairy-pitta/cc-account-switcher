@@ -662,8 +662,11 @@ usage_cache_file() {
 #
 # Two traps here. printf's %f honors LC_NUMERIC: under a comma-decimal locale it
 # prints a partial result and *then* fails on a dot-decimal string, so the locale
-# is pinned to C. And the fallback must stay out of the command substitution —
-# folded in, it is appended to that partial output and 15.0 reads as 150.
+# is pinned to C. The pin is a statement inside the subshell, not an `LC_ALL=C
+# printf` command prefix: bash 3.2 (macOS /bin/bash) does not re-run setlocale
+# for a transient assignment to a builtin, so the prefix form still fails there.
+# And the fallback must stay out of the command substitution — folded in, it is
+# appended to that partial output and 15.0 reads as 150.
 #
 # Prints nothing and returns 1 when the value can't be read, so callers can tell
 # an unreadable reading from a genuine 0%. The rate hook and the statusline carry
@@ -671,7 +674,7 @@ usage_cache_file() {
 # cannot source this one — keep the three in sync.
 usage_to_int() {
     local raw="$1" rounded
-    rounded=$(LC_ALL=C printf '%.0f' "$raw" 2>/dev/null) || return 1
+    rounded=$(LC_ALL=C; printf '%.0f' "$raw" 2>/dev/null) || return 1
     [[ "$rounded" =~ ^-?[0-9]+$ ]] || return 1
     printf '%s\n' "$rounded"
 }

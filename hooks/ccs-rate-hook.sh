@@ -54,10 +54,12 @@ if [[ -f "$CACHE_FILE" ]]; then
     # Round the way ccswitch.sh's usage_to_int() does — keep the two in sync.
     # LC_ALL=C because printf's %f honors LC_NUMERIC and a comma-decimal locale
     # fails on the cache's dot-decimal string after printing a partial result;
-    # no `|| echo` fallback inside the substitution, which would append to that
-    # partial output and read 15.0 as 150. An unreadable value leaves fast_ok
-    # false, so we delegate rather than guess.
-    if usage_int=$(LC_ALL=C printf '%.0f' "$usage" 2>/dev/null) && [[ "$usage_int" =~ ^-?[0-9]+$ ]]; then
+    # a statement inside the subshell, not an `LC_ALL=C printf` prefix, because
+    # bash 3.2 (macOS /bin/bash) ignores the prefix for a builtin. No `|| echo`
+    # fallback inside the substitution, which would append to that partial output
+    # and read 15.0 as 150. An unreadable value leaves fast_ok false, so we
+    # delegate rather than guess.
+    if usage_int=$(LC_ALL=C; printf '%.0f' "$usage" 2>/dev/null) && [[ "$usage_int" =~ ^-?[0-9]+$ ]]; then
         if [[ "$cached_at" -gt 0 && "$age" -lt "$CACHE_TTL" && "$usage_int" -lt "$THRESHOLD" ]]; then
             fast_ok=true
         fi
