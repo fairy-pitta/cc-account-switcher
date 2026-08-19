@@ -509,3 +509,20 @@ M
     [ "$status" -eq 0 ]
     [[ "$output" == *"ok-on-2"* ]]
 }
+
+@test "run passes ccs-global-looking flags through to the wrapped command" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    # Mock echoes back all args it received.
+    cat > "$MOCK_BIN/claude" << 'M'
+#!/bin/bash
+echo "ARGS:$*"
+exit 0
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    run run_ccswitch run --no-proactive -- claude -p "hi" --resume SID --no-restart
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ARGS:-p hi --resume SID --no-restart"* ]]
+}

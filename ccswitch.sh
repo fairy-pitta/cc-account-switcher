@@ -3326,6 +3326,13 @@ main() {
                 args+=("$@")
                 break
                 ;;
+            run)
+                # Like `exec`: stop interpreting global flags so the wrapped
+                # command (e.g. claude --resume/--no-restart) passes through
+                # verbatim. Put any ccs options before `run`.
+                args+=("$@")
+                break
+                ;;
             *)
                 args+=("$1")
                 shift
