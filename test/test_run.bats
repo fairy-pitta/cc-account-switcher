@@ -319,12 +319,13 @@ M
 #!/bin/bash
 active=\$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
 input=\$(cat)
-if [[ "\$active" == "1" ]]; then echo "429 rate_limit" >&2; exit 1; fi
+if [[ "\$active" == "1" ]]; then echo "A1GOT:\$input" >&2; echo "429 rate_limit" >&2; exit 1; fi
 echo "GOT:\$input"
 M
     chmod +x "$MOCK_BIN/claude"
 
     run bash -c 'printf "%s" "the-secret-prompt" | HOME="'"$TEST_HOME"'" PATH="'"$MOCK_BIN:$ORIGINAL_PATH"'" /bin/bash "'"$CCSWITCH_SCRIPT"'" run --no-proactive -- claude -p'
     [ "$status" -eq 0 ]
+    [[ "$output" == *"A1GOT:the-secret-prompt"* ]]
     [[ "$output" == *"GOT:the-secret-prompt"* ]]
 }

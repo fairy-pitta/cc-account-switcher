@@ -2287,7 +2287,10 @@ cmd_run() {
     # SIGPIPE if attempt 1 exits early. Read it fully up front instead.
     local stdin_spool=""
     if [[ ! -t 0 ]]; then
-        stdin_spool=$(mktemp "${TMPDIR:-/tmp}/ccs-run-stdin.XXXXXX")
+        stdin_spool=$(mktemp "${TMPDIR:-/tmp}/ccs-run-stdin.XXXXXX") || {
+            echo "ccs-run: failed to create stdin spool file" >&2
+            return 1
+        }
         chmod 600 "$stdin_spool"
         cat > "$stdin_spool"
     fi
