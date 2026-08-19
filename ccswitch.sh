@@ -2300,6 +2300,10 @@ cmd_run() {
         echo "Error: No accounts are managed yet" >&2
         exit 2
     fi
+    if [[ -n "$timeout_sec" && ! "$timeout_sec" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Error: --timeout must be a positive integer (seconds)" >&2
+        exit 2
+    fi
     setup_directories
 
     local total
@@ -2315,13 +2319,16 @@ cmd_run() {
     # Spool non-tty stdin so every attempt replays byte-identical input. A live
     # pipe would be drained by attempt 1; a concurrent tee could truncate on
     # SIGPIPE if attempt 1 exits early. Read it fully up front instead.
-    local stdin_spool="" child_pid="" watchdog_pid=""
+    local stdin_spool="" child_pid="" watchdog_pid="" timeout_flag=""
 
-    # Unified cleanup: kill any live watchdog/child and remove all temp files.
+    # Unified cleanup: kill any live watchdog/child (and its process group)
+    # and remove all temp files.
     _ccs_run_cleanup() {
         [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null
-        [[ -n "$child_pid" ]]    && kill -TERM "$child_pid" 2>/dev/null
-        rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"}
+        # kill -TERM -PID sends SIGTERM to the entire process group (PID == PGID
+        # because set -m made the child a group leader before launch).
+        [[ -n "$child_pid" ]] && kill -TERM -"$child_pid" 2>/dev/null || true
+        rm -f "$out_buf" "$err_buf" ${stdin_spool:+"$stdin_spool"} ${timeout_flag:+"$timeout_flag"}
     }
     trap '_ccs_run_cleanup; trap - INT TERM; exit 130' INT
     trap '_ccs_run_cleanup; trap - INT TERM; exit 143' TERM
@@ -2352,6 +2359,11 @@ cmd_run() {
 
         : > "$out_buf"; : > "$err_buf"
         local rc=0 timed_out=0
+        # set -m makes the background job its own process-group leader (PGID==PID),
+        # so kill -TERM -"$child_pid" can signal the entire tree. set +m restores
+        # the original job-control mode immediately after fork. In non-interactive
+        # shells set -m produces no chatter.
+        set -m
         (
             export CLAUDE_CODE_MAX_RETRIES="${CLAUDE_CODE_MAX_RETRIES:-3}"
             export CLAUDE_CODE_RETRY_WATCHDOG="${CLAUDE_CODE_RETRY_WATCHDOG:-0}"
@@ -2362,9 +2374,18 @@ cmd_run() {
             fi
         ) >"$out_buf" 2>"$err_buf" &
         child_pid=$!
+        set +m
 
         if [[ -n "$timeout_sec" ]]; then
-            ( sleep "$timeout_sec"; kill -TERM "$child_pid" 2>/dev/null ) &
+            # Use a path (not yet created) as a flag; watchdog touches it before
+            # killing so parent can detect timeout even across the kill-0 race.
+            timeout_flag="${TMPDIR:-/tmp}/ccs-run-timeout.$$.${attempt}"
+            # Watchdog: sleep then signal the entire process group (child_pid ==
+            # PGID because set -m was active at launch). Touch flag BEFORE kill
+            # so the parent detects timeout even if it wins the kill-0 race.
+            ( sleep "$timeout_sec"
+              touch "$timeout_flag" 2>/dev/null
+              kill -TERM -"$child_pid" 2>/dev/null ) &
             watchdog_pid=$!
         fi
         wait "$child_pid" || rc=$?
@@ -2372,10 +2393,12 @@ cmd_run() {
         if [[ -n "$watchdog_pid" ]]; then
             if kill -0 "$watchdog_pid" 2>/dev/null; then
                 kill "$watchdog_pid" 2>/dev/null    # child finished first
-            else
-                timed_out=1                           # watchdog already fired
             fi
             wait "$watchdog_pid" 2>/dev/null || true
+            # Timeout occurred iff the watchdog touched the flag (before kill).
+            if [[ -n "$timeout_flag" && -f "$timeout_flag" ]]; then
+                timed_out=1
+            fi
             watchdog_pid=""
         fi
         cat "$err_buf" >&2

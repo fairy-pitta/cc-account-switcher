@@ -445,12 +445,45 @@ M
     create_fake_credentials "a@example.com"
     cat > "$MOCK_BIN/claude" << 'M'
 #!/bin/bash
-sleep 30
+echo "TIMED-OUT-STDOUT-SHOULD-NOT-APPEAR"
+exec sleep 30
+M
+    chmod +x "$MOCK_BIN/claude"
+
+    local start=$SECONDS
+    run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
+    local elapsed=$(( SECONDS - start ))
+    [ "$status" -eq 124 ]
+    [ "$elapsed" -lt 10 ]
+    [[ "$output" != *"TIMED-OUT-STDOUT-SHOULD-NOT-APPEAR"* ]]
+}
+
+@test "run's --timeout reaps the child's subprocess tree" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    create_fake_credentials "a@example.com"
+    local pidfile="$TEST_HOME/grandchild.pid"
+    cat > "$MOCK_BIN/claude" << M
+#!/bin/bash
+sleep 30 &
+echo \$! > "$pidfile"
+wait
 M
     chmod +x "$MOCK_BIN/claude"
 
     run run_ccswitch run --no-proactive --timeout 1 -- claude -p "hi"
     [ "$status" -eq 124 ]
+    local gpid; gpid=$(cat "$pidfile")
+    run kill -0 "$gpid"
+    [ "$status" -ne 0 ]
+}
+
+@test "run rejects a non-numeric --timeout" {
+    setup_fake_account "a@example.com" "uuid-a"
+    add_account_to_sequence "1" "a@example.com" "uuid-a" "true"
+    run run_ccswitch run --timeout abc -- claude -p "hi"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"positive integer"* ]]
 }
 
 @test "run treats a timed-out child that was mid-rate-limit as a rate limit" {
